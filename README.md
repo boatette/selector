@@ -49,6 +49,43 @@ border = "#4c9ed9cc"
 
 `bottom` is the load-bearing default: it puts selector above the wallpaper but beneath every ordinary window, so a drag reaches it only when the desktop under the pointer is empty. Raising it to `top` or `overlay` makes selector swallow clicks meant for your windows.
 
+### home-manager
+
+The flake exposes a home-manager module as homeModules.selector:
+
+```nix
+{
+  inputs.selector.url = "github:boatette/selector";
+}
+```
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.selector.homeModules.selector ];
+
+  programs.selector = {
+    enable = true;
+
+    settings = {
+      layer = "bottom";
+      border_width = 2;
+      fill = "#4c9ed940";
+      border = "#4c9ed9cc";
+    };
+  };
+}
+```
+
+| Option         | Default               |                                                           |
+| -------------- | --------------------- | --------------------------------------------------------- |
+| enable         | false                 |                                                           |
+| package        | this flake's selector |                                                           |
+| systemd.enable | true                  | Run from a user service bound to graphical-session.target |
+| settings       | {}                    | Written to $XDG_CONFIG_HOME/selector/config.toml          |
+
+The systemd service is conditioned on WAYLAND_DISPLAY, so it stays inert outside a Wayland session. Set systemd.enable = false to install the binary and config but launch selector yourself. Note that the config is read once at startup, so changing settings needs a service restart.
+
 ## How it works
 
 selector binds three globals, wl_compositor, wl_shm, and zwlr_layer_shell_v1, and creates one layer surface per output. Each surface is anchored to all four edges with an exclusive zone of `-1`, so it covers its entire output, panels included.
