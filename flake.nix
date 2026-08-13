@@ -35,6 +35,11 @@
         default = selector;
       });
 
+      homeModules = rec {
+        selector = import ./nix/home-manager.nix self;
+        default = selector;
+      };
+
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
