@@ -142,6 +142,13 @@ Rendering is software into a `wl_shm` buffer (`Argb8888`, premultiplied). There 
 - Every frame repaints the full surface rather than tracking damage.
 - The config is read once at startup; there is no reload and no CLI flags.
 
+## TODO:
+
+- Add blur support
+- Add rounded corner support
+- Test on more wayland compositors
+- Fix issues in [Known gaps](#known-gaps)
+
 ## License
 
 MIT
