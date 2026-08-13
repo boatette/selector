@@ -10,7 +10,9 @@ repository = "https://github.com/boatette/selector"
 anyhow = "1"
 env_logger = "0.11"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
 smithay-client-toolkit = { version = "0.21", default-features = false }
+toml = "1"
 wayland-client = "0.31"
 
 [profile.release]
