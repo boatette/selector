@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
@@ -90,6 +90,18 @@ pub struct Config {
     pub layer: Layer,
     // how far the pointer must travel before a press counts as a drag, without it a plain click flashes a one-pixel rectangle
     pub drag_threshold: f64,
+    // optional path to a second file supplying fill and border, so a theming tool
+    // can own the colours while the rest of this file stays declarative.
+    // relative paths resolve against the directory holding this config
+    pub colors: Option<PathBuf>,
+}
+
+// the overlay file, both keys optional so a generator can write just one
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Colors {
+    fill: Option<Color>,
+    border: Option<Color>,
 }
 
 impl Default for Config {
@@ -100,6 +112,7 @@ impl Default for Config {
             border_width: 1,
             layer: Layer::Bottom,
             drag_threshold: 3.0,
+            colors: None,
         }
     }
 }
@@ -124,12 +137,71 @@ impl Config {
             }
         };
 
-        let config = toml::from_str(&text)
+        let mut config: Self = toml::from_str(&text)
             .with_context(|| format!("invalid config at {}", path.display()))?;
 
         log::info!("loaded config from {}", path.display());
+
+        let base = path.parent().unwrap_or(Path::new(""));
+        config.load_colors(base, home_dir().as_deref())?;
+
         Ok(config)
     }
+
+    fn load_colors(&mut self, base: &Path, home: Option<&Path>) -> Result<()> {
+        let Some(configured) = self.colors.clone() else {
+            return Ok(());
+        };
+        let path = resolve_path(&configured, base, home);
+
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                log::warn!(
+                    "no colour file at {}, keeping the colours from the main config",
+                    path.display()
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("could not read {}", path.display()));
+            }
+        };
+
+        let colors: Colors = toml::from_str(&text)
+            .with_context(|| format!("invalid colour file at {}", path.display()))?;
+
+        self.apply_colors(colors);
+        log::info!("loaded colours from {}", path.display());
+        Ok(())
+    }
+
+    fn apply_colors(&mut self, colors: Colors) {
+        if let Some(fill) = colors.fill {
+            self.fill = fill;
+        }
+        if let Some(border) = colors.border {
+            self.border = border;
+        }
+    }
+}
+
+// expands a leading ~ and resolves relative paths against the config's own directory
+fn resolve_path(path: &Path, base: &Path, home: Option<&Path>) -> PathBuf {
+    let expanded = match (path.strip_prefix("~"), home) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    };
+
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(expanded)
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -232,6 +304,128 @@ mod tests {
     #[test]
     fn an_unknown_layer_is_an_error() {
         assert!(toml::from_str::<Config>(r#"layer = "middle""#).is_err());
+    }
+
+    fn colors_from(text: &str) -> Colors {
+        toml::from_str(text).unwrap()
+    }
+
+    // a scratch directory of our own, so the filesystem tests do not collide
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("selector-test-{}-{name}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_colour_file_overrides_the_main_config() {
+        let mut config = Config::default();
+        config.apply_colors(colors_from(
+            r##"
+            fill = "#11223344"
+            border = "#556677"
+            "##,
+        ));
+
+        assert_eq!(config.fill, Color::rgba(0x11, 0x22, 0x33, 0x44));
+        assert_eq!(config.border, Color::rgba(0x55, 0x66, 0x77, 0xff));
+    }
+
+    #[test]
+    fn a_partial_colour_file_leaves_the_other_colour_alone() {
+        let mut config = Config::default();
+        let untouched = config.border;
+        config.apply_colors(colors_from(r##"fill = "#11223344""##));
+
+        assert_eq!(config.fill, Color::rgba(0x11, 0x22, 0x33, 0x44));
+        assert_eq!(config.border, untouched);
+    }
+
+    #[test]
+    fn an_empty_colour_file_changes_nothing() {
+        let mut config = Config::default();
+        config.apply_colors(colors_from(""));
+
+        assert_eq!(config.fill, Config::default().fill);
+        assert_eq!(config.border, Config::default().border);
+    }
+
+    #[test]
+    fn a_colour_file_may_not_carry_other_settings() {
+        assert!(
+            toml::from_str::<Colors>("border_width = 4").is_err(),
+            "the overlay is colours only"
+        );
+    }
+
+    #[test]
+    fn a_missing_colour_file_is_not_an_error() {
+        let dir = temp_dir("missing");
+        let mut config = Config {
+            colors: Some(PathBuf::from("nope.toml")),
+            ..Config::default()
+        };
+
+        config.load_colors(&dir, None).expect("must not fail");
+        assert_eq!(
+            config.fill,
+            Config::default().fill,
+            "the main config's colours survive"
+        );
+    }
+
+    #[test]
+    fn a_malformed_colour_file_is_an_error() {
+        let dir = temp_dir("malformed");
+        fs::write(dir.join("colors.toml"), r#"fill = "not-a-colour""#).unwrap();
+
+        let mut config = Config {
+            colors: Some(PathBuf::from("colors.toml")),
+            ..Config::default()
+        };
+
+        assert!(config.load_colors(&dir, None).is_err());
+    }
+
+    #[test]
+    fn a_relative_colour_path_resolves_against_the_config_directory() {
+        let dir = temp_dir("relative");
+        fs::write(dir.join("colors.toml"), r##"fill = "#89b4fa40""##).unwrap();
+
+        let mut config = Config {
+            colors: Some(PathBuf::from("colors.toml")),
+            ..Config::default()
+        };
+
+        config.load_colors(&dir, None).unwrap();
+        assert_eq!(config.fill, Color::rgba(0x89, 0xb4, 0xfa, 0x40));
+    }
+
+    #[test]
+    fn paths_expand_tilde_and_resolve_relative_against_the_base() {
+        let home = Path::new("/home/someone");
+        let base = Path::new("/etc/selector");
+
+        assert_eq!(
+            resolve_path(Path::new("~/.config/c.toml"), base, Some(home)),
+            PathBuf::from("/home/someone/.config/c.toml")
+        );
+        assert_eq!(
+            resolve_path(Path::new("c.toml"), base, Some(home)),
+            PathBuf::from("/etc/selector/c.toml")
+        );
+        assert_eq!(
+            resolve_path(Path::new("/absolute/c.toml"), base, Some(home)),
+            PathBuf::from("/absolute/c.toml")
+        );
+    }
+
+    #[test]
+    fn a_tilde_path_is_left_alone_without_a_home() {
+        assert_eq!(
+            resolve_path(Path::new("~/c.toml"), Path::new("/etc"), None),
+            PathBuf::from("/etc/~/c.toml")
+        );
     }
 
     // keeps the shipped example honest, it must stay parseable and match the defaults it documents
