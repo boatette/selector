@@ -2,5 +2,19 @@
 name = "selector"
 version = "0.1.0"
 edition = "2024"
+description = "A desktop selection box for Wayland"
+license = "MIT"
+repository = "https://github.com/boatette/selector"
 
 [dependencies]
+anyhow = "1"
+env_logger = "0.11"
+log = "0.4"
+smithay-client-toolkit = { version = "0.21", default-features = false }
+wayland-client = "0.31"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
