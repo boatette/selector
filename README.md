@@ -24,6 +24,31 @@ RUST_LOG=selector=debug cargo run
 
 selector runs in the foreground until its surfaces are closed. Drag with the left button on empty desktop
 
+## Configuration
+
+selector reads $XDG_CONFIG_HOME/selector/config.toml, falling back to ~/.config/selector/config.toml. Every key is optional and anything left out keeps its default.
+
+A malformed or unreadable config is a startup error rather than a silent fallback
+
+[`config.example.toml`](config.example.toml) documents every key at its default value:
+
+```toml
+# background, bottom, top, overlay
+layer = "bottom"
+
+# pixels the pointer must travel before a press counts as a drag
+drag_threshold = 3.0
+
+# outline thickness in pixels, 0 disables the outline
+border_width = 1
+
+# #rrggbb or #rrggbbaa, alpha defaults to ff when omitted
+fill = "#4c9ed940"
+border = "#4c9ed9cc"
+```
+
+`bottom` is the load-bearing default: it puts selector above the wallpaper but beneath every ordinary window, so a drag reaches it only when the desktop under the pointer is empty. Raising it to `top` or `overlay` makes selector swallow clicks meant for your windows.
+
 ## How it works
 
 selector binds three globals, wl_compositor, wl_shm, and zwlr_layer_shell_v1, and creates one layer surface per output. Each surface is anchored to all four edges with an exclusive zone of `-1`, so it covers its entire output, panels included.
@@ -35,7 +60,7 @@ Rendering is software into a `wl_shm` buffer (`Argb8888`, premultiplied). There 
 - A selection is confined to the output it started on; dragging across monitors needs output-layout awareness.
 - Completed selections are logged only. `App::selection_completed` is the seam where they will be reported.
 - Every frame repaints the full surface rather than tracking damage.
-- `Config` is compiled-in defaults; there is no config file or CLI yet.
+- The config is read once at startup; there is no reload and no CLI flags.
 
 ## License
 
