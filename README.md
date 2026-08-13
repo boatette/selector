@@ -49,6 +49,33 @@ border = "#4c9ed9cc"
 
 `bottom` is the load-bearing default: it puts selector above the wallpaper but beneath every ordinary window, so a drag reaches it only when the desktop under the pointer is empty. Raising it to `top` or `overlay` makes selector swallow clicks meant for your windows.
 
+### Colours from a generator
+
+The optional `colors` key points at a second file that supplies `fill` and `border`, so a theming engine can own the colours while everything else stays declarative:
+
+```toml
+# config.toml, managed by you
+layer = "bottom"
+border_width = 1
+colors = "colors.toml"
+```
+
+```toml
+# colors.toml, maanaged by generator
+fill = "#89b4fa40"
+border = "#89b4facc"
+```
+
+Relative paths resolve against the directory holding `config.toml`, and a leading `~` expands. Both keys in the colour file are optional, so a generator that only writes `fill` leaves `border` as configured. The colour file carries colours only anything else in it is an error.
+
+A missing colour file is only a warning: the generator may not have run yet, and selector should not refuse to start over it. A malformed one is a hard error, like any other config.
+
+selector reads its config once at startup, so point the generator's post-run hook at the service:
+
+```sh
+systemctl --user try-restart selector.service
+```
+
 ### home-manager
 
 The flake exposes a home-manager module as homeModules.selector:
@@ -85,6 +112,22 @@ The flake exposes a home-manager module as homeModules.selector:
 | settings       | {}                    | Written to $XDG_CONFIG_HOME/selector/config.toml          |
 
 The systemd service is conditioned on WAYLAND_DISPLAY, so it stays inert outside a Wayland session. Set systemd.enable = false to install the binary and config but launch selector yourself. Note that the config is read once at startup, so changing settings needs a service restart.
+
+Home-manager writes `config.toml` as a read-only symlink into the Nix store, which a theming tool cannot edit. `settings.colors` is the way round that — it names a runtime path, so the generator owns the colours and home-manager owns everything else:
+
+```nix
+programs.selector = {
+  enable = true;
+
+  settings = {
+    layer = "bottom";
+    border_width = 2;
+    colors = "colors.toml";
+  };
+};
+```
+
+`colors.toml` is then read from `~/.config/selector/`, beside the symlink rather than inside the store. Leave `fill` and `border` unset here and the generator has sole say over them.
 
 ## How it works
 
