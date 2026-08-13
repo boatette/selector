@@ -88,6 +88,13 @@ in
 
           fill = colorOption "interior colour of the selection box, as #rrggbb or #rrggbbaa";
           border = colorOption "outline colour of the selection box, as #rrggbb or #rrggbbaa";
+
+          colors = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            example = "~/.config/selector/colors.toml";
+            description = "path to a second file supplying fill and border";
+          };
         };
       };
     };
