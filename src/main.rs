@@ -13,5 +13,5 @@ fn main() -> Result<()> {
     )
     .init();
 
-    app::run(Config::default())
+    app::run(Config::load()?)
 }
