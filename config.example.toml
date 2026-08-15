@@ -9,6 +9,10 @@ drag_threshold = 3.0
 # outline thickness in pixels, 0 disables the outline
 border_width = 1
 
+# ask the compositor to blur what is behind the selection
+# needs a compositor implementing ext-background-effect, and only shows through a translucent fill
+blur = false
+
 # colours are #rrggbb or #rrggbbaa, alpha defaults to ff when omitted
 fill = "#4c9ed940"
 border = "#4c9ed9cc"

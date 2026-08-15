@@ -42,12 +42,41 @@ drag_threshold = 3.0
 # outline thickness in pixels, 0 disables the outline
 border_width = 1
 
+# ask the compositor to blur what is behind the selection
+blur = false
+
 # #rrggbb or #rrggbbaa, alpha defaults to ff when omitted
 fill = "#4c9ed940"
 border = "#4c9ed9cc"
 ```
 
 `bottom` is the load-bearing default: it puts selector above the wallpaper but beneath every ordinary window, so a drag reaches it only when the desktop under the pointer is empty. Raising it to `top` or `overlay` makes selector swallow clicks meant for your windows.
+
+### Blur
+
+A Wayland client cannot see what is behind it, so blur is something selector asks for rather than draws. With `blur = true` selector uses [ext-background-effect-v1](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/tree/main/staging/ext-background-effect) to name the selection rectangle as a region to blur, and the compositor blurs what it paints underneath. The blur shows through wherever `fill` is translucent, so an opaque `fill` hides it completely and the alpha in `fill` is what tunes it. Everything else about the effect (radius, passes, whether it happens at all) is compositor policy, the protocol has no knobs.
+
+The region follows the drag and is withdrawn when the selection ends, so nothing is blurred while the desktop is idle.
+
+On a compositor without the protocol, `blur = true` logs a warning at startup and selector draws as it always did. niri implements it, but also wants a rule allowing the effect for our layer surface:
+
+```kdl
+layer-rule {
+    match namespace="^selector$"
+
+    background-effect {
+        blur true
+    }
+}
+```
+
+Hyprland has no such protocol and blurs layer surfaces by rule instead, keyed off the same namespace, with no help needed from `blur`:
+
+```ini
+layerrule = blur, selector
+# without this the whole transparent surface is blurred, not just the rectangle
+layerrule = ignorealpha 0.1, selector
+```
 
 ### Colours from a generator
 
@@ -131,7 +160,7 @@ programs.selector = {
 
 ## How it works
 
-selector binds three globals, wl_compositor, wl_shm, and zwlr_layer_shell_v1, and creates one layer surface per output. Each surface is anchored to all four edges with an exclusive zone of `-1`, so it covers its entire output, panels included.
+selector binds three globals, wl_compositor, wl_shm, and zwlr_layer_shell_v1, plus ext_background_effect_manager_v1 when it is there and blur is on, and creates one layer surface per output. Each surface is anchored to all four edges with an exclusive zone of `-1`, so it covers its entire output, panels included.
 
 Rendering is software into a `wl_shm` buffer (`Argb8888`, premultiplied). There is no GPU dependency, and the surface is fully transparent whenever no drag is in progress.
 
@@ -144,7 +173,6 @@ Rendering is software into a `wl_shm` buffer (`Argb8888`, premultiplied). There 
 
 ## TODO:
 
-- Add blur support
 - Add rounded corner support
 - Test on more wayland compositors
 - Fix issues in [Known gaps](#known-gaps)

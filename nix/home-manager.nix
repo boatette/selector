@@ -1,9 +1,3 @@
-# home-manager module for selector
-#
-#   inputs.selector.url = "github:boatette/selector";
-#
-#   imports = [ inputs.selector.homeModules.selector ];
-#   programs.selector.enable = true;
 self:
 {
   config,
@@ -84,6 +78,13 @@ in
             default = null;
             example = 1;
             description = "outline thickness in pixels, 0 disables the outline";
+          };
+
+          blur = lib.mkOption {
+            type = lib.types.nullOr lib.types.bool;
+            default = null;
+            example = true;
+            description = "ask the compositor to blur what is behind the selection, needs ext-background-effect and a translucent fill";
           };
 
           fill = colorOption "interior colour of the selection box, as #rrggbb or #rrggbbaa";

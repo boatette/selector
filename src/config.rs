@@ -8,7 +8,6 @@ use smithay_client_toolkit::shell::wlr_layer::Layer;
 
 const CONFIG_RELATIVE_PATH: &str = "selector/config.toml";
 
-// straight (non-premultiplied) 8-bit rgba
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
     pub r: u8,
@@ -26,7 +25,6 @@ impl Color {
         self.a == 0
     }
 
-    // #rrggbb or #rrggbbaa, the leading hash is optional and alpha defaults to opaque
     pub fn from_hex(text: &str) -> Result<Self> {
         let digits = text.strip_prefix('#').unwrap_or(text);
 
@@ -43,7 +41,6 @@ impl Color {
         }
     }
 
-    // wl_shm Argb8888 is little-endian and premultiplied, so scale the channels by alpha once here rather than at every pixel write
     pub fn to_argb8888(self) -> [u8; 4] {
         let premultiply = |c: u8| ((c as u32 * self.a as u32 + 127) / 255) as u8;
         [
@@ -62,7 +59,6 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
-// Layer is a foreign type, so it cannot derive Deserialize
 fn deserialize_layer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Layer, D::Error> {
     let text = String::deserialize(deserializer)?;
     match text.as_str() {
@@ -76,27 +72,19 @@ fn deserialize_layer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Layer
     }
 }
 
-// deny_unknown_fields so a typo is an error rather than a setting that silently never applies
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub fill: Color,
     pub border: Color,
-    // zero disables the outline
     pub border_width: u32,
-    // Bottom puts us above the wallpaper (Background) but below every ordinary window,
-    // so drags land here only when the desktop underneath is empty
     #[serde(deserialize_with = "deserialize_layer")]
     pub layer: Layer,
-    // how far the pointer must travel before a press counts as a drag, without it a plain click flashes a one-pixel rectangle
     pub drag_threshold: f64,
-    // optional path to a second file supplying fill and border, so a theming tool
-    // can own the colours while the rest of this file stays declarative.
-    // relative paths resolve against the directory holding this config
+    pub blur: bool,
     pub colors: Option<PathBuf>,
 }
 
-// the overlay file, both keys optional so a generator can write just one
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Colors {
@@ -112,14 +100,13 @@ impl Default for Config {
             border_width: 1,
             layer: Layer::Bottom,
             drag_threshold: 3.0,
+            blur: false,
             colors: None,
         }
     }
 }
 
 impl Config {
-    // a missing config is fine and means defaults, an unreadable or malformed one is not:
-    // falling back silently would leave the user with no way to tell their config never took effect
     pub fn load() -> Result<Self> {
         let Some(path) = config_path() else {
             log::debug!("neither XDG_CONFIG_HOME nor HOME is set, using defaults");
@@ -186,7 +173,6 @@ impl Config {
     }
 }
 
-// expands a leading ~ and resolves relative paths against the config's own directory
 fn resolve_path(path: &Path, base: &Path, home: Option<&Path>) -> PathBuf {
     let expanded = match (path.strip_prefix("~"), home) {
         (Ok(rest), Some(home)) => home.join(rest),
@@ -310,7 +296,6 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
-    // a scratch directory of our own, so the filesystem tests do not collide
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("selector-test-{}-{name}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -428,7 +413,6 @@ mod tests {
         );
     }
 
-    // keeps the shipped example honest, it must stay parseable and match the defaults it documents
     #[test]
     fn the_example_config_parses_and_matches_the_defaults() {
         let example = include_str!("../config.example.toml");
