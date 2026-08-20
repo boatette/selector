@@ -21,7 +21,7 @@ impl Color {
         Self { r, g, b, a }
     }
 
-    pub fn is_transparent(&self) -> bool {
+    pub const fn is_transparent(self) -> bool {
         self.a == 0
     }
 
@@ -131,7 +131,7 @@ impl Config {
 
         log::info!("loaded config from {}", path.display());
 
-        let base = path.parent().unwrap_or(Path::new(""));
+        let base = path.parent().unwrap_or_else(|| Path::new(""));
         config.load_colors(base, home_dir().as_deref())?;
 
         Ok(config)
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn a_partial_config_keeps_defaults_for_everything_else() {
-        let config: Config = toml::from_str(r#"border_width = 4"#).unwrap();
+        let config: Config = toml::from_str("border_width = 4").unwrap();
 
         assert_eq!(config.border_width, 4);
         assert_eq!(config.fill, Config::default().fill);

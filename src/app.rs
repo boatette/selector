@@ -45,7 +45,7 @@ struct Monitor {
     configured: bool,
     dirty: bool,
     frame_pending: bool,
-    painted: Option<Option<Rect>>,
+    painted: Option<Rect>,
     blur: Option<ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1>,
     blur_region: Option<Rect>,
 }
@@ -57,7 +57,8 @@ impl Monitor {
 
     fn local_rect(&self, global: Option<Rect>) -> Option<Rect> {
         let rect = global?.translate(-self.origin.0, -self.origin.1);
-        (!rect.clamp_to_surface(self.width, self.height).is_empty()).then_some(rect)
+        rect.overlaps_surface(self.width, self.height)
+            .then_some(rect)
     }
 
     fn point_to_global(&self, position: (f64, f64)) -> Point {
@@ -156,7 +157,7 @@ impl App {
         })
     }
 
-    pub fn should_exit(&self) -> bool {
+    pub const fn should_exit(&self) -> bool {
         self.exit
     }
 
@@ -229,10 +230,9 @@ impl App {
     }
 
     fn output_origin(&self, output: &wl_output::WlOutput) -> (i32, i32) {
-        self.output_state
-            .info(output)
-            .map(|info| info.logical_position.unwrap_or(info.location))
-            .unwrap_or((0, 0))
+        self.output_state.info(output).map_or((0, 0), |info| {
+            info.logical_position.unwrap_or(info.location)
+        })
     }
 
     fn remove_monitor(&mut self, output: &wl_output::WlOutput) {
@@ -248,7 +248,7 @@ impl App {
 
         for index in 0..self.monitors.len() {
             let local = self.monitors[index].local_rect(global);
-            if self.monitors[index].painted == Some(local) {
+            if self.monitors[index].painted == local {
                 continue;
             }
 
@@ -303,7 +303,7 @@ impl App {
         }
 
         monitor.set_blur_region(compositor, rect, config.corner_radius);
-        monitor.painted = Some(rect);
+        monitor.painted = rect;
 
         monitor.layer.commit();
     }
@@ -340,7 +340,6 @@ impl CompositorHandler for App {
         _surface: &wl_surface::WlSurface,
         _new_factor: i32,
     ) {
-        // buffers are allocated at the size the compositor configures, so scaling is handled by the configure path
     }
 
     fn transform_changed(
@@ -464,7 +463,6 @@ impl LayerShellHandler for App {
         monitor.height = height;
         monitor.configured = true;
         monitor.frame_pending = false;
-        monitor.painted = None;
 
         self.draw(qh, index);
     }
@@ -550,8 +548,9 @@ impl PointerHandler for App {
                     }
                     self.selection.cancel()
                 }
-                PointerEventKind::Enter { .. } | PointerEventKind::Axis { .. } => continue,
-                PointerEventKind::Release { .. } => continue,
+                PointerEventKind::Enter { .. }
+                | PointerEventKind::Axis { .. }
+                | PointerEventKind::Release { .. } => continue,
             };
 
             if redraw.is_needed() {

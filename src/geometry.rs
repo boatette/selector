@@ -5,7 +5,7 @@ pub struct Point {
 }
 
 impl Point {
-    pub fn new(x: f64, y: f64) -> Self {
+    pub const fn new(x: f64, y: f64) -> Self {
         Self { x, y }
     }
 
@@ -13,12 +13,6 @@ impl Point {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         dx.hypot(dy)
-    }
-}
-
-impl From<(f64, f64)> for Point {
-    fn from((x, y): (f64, f64)) -> Self {
-        Self::new(x, y)
     }
 }
 
@@ -31,7 +25,7 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
             x,
             y,
@@ -54,15 +48,15 @@ impl Rect {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
     }
 
-    pub fn right(&self) -> i32 {
+    pub const fn right(&self) -> i32 {
         self.x.saturating_add(self.width as i32)
     }
 
-    pub fn bottom(&self) -> i32 {
+    pub const fn bottom(&self) -> i32 {
         self.y.saturating_add(self.height as i32)
     }
 
@@ -105,12 +99,16 @@ impl Rect {
         spans
     }
 
-    pub fn translate(&self, dx: i32, dy: i32) -> Self {
+    pub const fn translate(&self, dx: i32, dy: i32) -> Self {
         Self {
             x: self.x.saturating_add(dx),
             y: self.y.saturating_add(dy),
             ..*self
         }
+    }
+
+    pub fn overlaps_surface(&self, width: u32, height: u32) -> bool {
+        !self.clamp_to_surface(width, height).is_empty()
     }
 
     pub fn clamp_to_surface(&self, width: u32, height: u32) -> Self {
@@ -128,7 +126,7 @@ impl Rect {
     }
 }
 
-pub fn rounded_row_inset(radius: u32, row: u32) -> u32 {
+fn rounded_row_inset(radius: u32, row: u32) -> u32 {
     if radius == 0 || row >= radius {
         return 0;
     }
@@ -242,5 +240,14 @@ mod tests {
     fn clamping_a_fully_offscreen_rect_yields_empty() {
         let r = Rect::new(100, 100, 10, 10).clamp_to_surface(20, 20);
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn overlapping_covers_partial_and_offscreen_rects() {
+        assert!(Rect::new(-10, -10, 40, 40).overlaps_surface(20, 20));
+        assert!(Rect::new(19, 19, 1, 1).overlaps_surface(20, 20));
+        assert!(!Rect::new(100, 100, 10, 10).overlaps_surface(20, 20));
+        assert!(!Rect::new(20, 0, 10, 10).overlaps_surface(20, 20));
+        assert!(!Rect::new(0, 0, 0, 0).overlaps_surface(20, 20));
     }
 }
