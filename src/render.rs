@@ -10,101 +10,127 @@ pub fn draw(
     rect: Option<Rect>,
     config: &Config,
 ) {
-    canvas.fill(0);
-
-    let Some(rect) = rect else { return };
-    if rect
-        .clamp_to_surface(canvas_width, canvas_height)
-        .is_empty()
-    {
-        return;
+    Canvas {
+        pixels: canvas,
+        width: canvas_width,
+        height: canvas_height,
     }
-
-    let inset = config.border_width.min(rect.width / 2).min(rect.height / 2);
-    let radius = config
-        .corner_radius
-        .min(rect.width / 2)
-        .min(rect.height / 2);
-
-    if inset > 0 && !config.border.is_transparent() {
-        fill_rounded_rect(
-            canvas,
-            canvas_width,
-            canvas_height,
-            rect,
-            radius,
-            config.border,
-        );
-    }
-
-    let interior = Rect::new(
-        rect.x + inset as i32,
-        rect.y + inset as i32,
-        rect.width - inset * 2,
-        rect.height - inset * 2,
-    );
-
-    if !interior.is_empty() {
-        fill_rounded_rect(
-            canvas,
-            canvas_width,
-            canvas_height,
-            interior,
-            radius.saturating_sub(inset),
-            config.fill,
-        );
-    }
+    .draw(rect, config);
 }
 
-fn fill_rounded_rect(
-    canvas: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
-    rect: Rect,
-    radius: u32,
-    color: Color,
-) {
-    let radius = radius.min(rect.width / 2).min(rect.height / 2);
-    if radius == 0 {
-        fill_rect(canvas, canvas_width, canvas_height, rect, color);
-        return;
-    }
+struct Canvas<'a> {
+    pixels: &'a mut [u8],
+    width: u32,
+    height: u32,
+}
 
-    let pixel = color.to_argb8888();
-    let edge = radius as i32;
-    let span_width = rect.width - radius * 2;
+impl Canvas<'_> {
+    fn draw(&mut self, rect: Option<Rect>, config: &Config) {
+        self.pixels.fill(0);
 
-    fill_rect(
-        canvas,
-        canvas_width,
-        canvas_height,
-        Rect::new(rect.x, rect.y + edge, rect.width, rect.height - radius * 2),
-        color,
-    );
-
-    let extent = radius as f64;
-    for row in 0..radius {
-        let top = rect.y + row as i32;
-        let bottom = rect.bottom() - 1 - row as i32;
-
-        for y in [top, bottom] {
-            let span = Rect::new(rect.x + edge, y, span_width, 1);
-            fill_rect(canvas, canvas_width, canvas_height, span, color);
+        let Some(rect) = rect else { return };
+        if !rect.overlaps_surface(self.width, self.height) {
+            return;
         }
 
-        let dy = extent - (row as f64 + 0.5);
-        for col in 0..radius {
-            let dx = extent - (col as f64 + 0.5);
-            let coverage = coverage(extent - dx.hypot(dy) + 0.5);
-            if coverage == 0 {
-                continue;
+        let inset = config.border_width.min(rect.width / 2).min(rect.height / 2);
+        let radius = config
+            .corner_radius
+            .min(rect.width / 2)
+            .min(rect.height / 2);
+
+        if inset > 0 && !config.border.is_transparent() {
+            self.fill_rounded_rect(rect, radius, config.border);
+        }
+
+        let interior = Rect::new(
+            rect.x + inset as i32,
+            rect.y + inset as i32,
+            rect.width - inset * 2,
+            rect.height - inset * 2,
+        );
+
+        if !interior.is_empty() {
+            self.fill_rounded_rect(interior, radius.saturating_sub(inset), config.fill);
+        }
+    }
+
+    fn fill_rounded_rect(&mut self, rect: Rect, radius: u32, color: Color) {
+        let radius = radius.min(rect.width / 2).min(rect.height / 2);
+        if radius == 0 {
+            self.fill_rect(rect, color);
+            return;
+        }
+
+        let pixel = color.to_argb8888();
+        let edge = radius as i32;
+        let span_width = rect.width - radius * 2;
+
+        self.fill_rect(
+            Rect::new(rect.x, rect.y + edge, rect.width, rect.height - radius * 2),
+            color,
+        );
+
+        let extent = radius as f64;
+        for row in 0..radius {
+            let top = rect.y + row as i32;
+            let bottom = rect.bottom() - 1 - row as i32;
+
+            for y in [top, bottom] {
+                self.fill_rect(Rect::new(rect.x + edge, y, span_width, 1), color);
             }
 
-            let left = rect.x + col as i32;
-            let right = rect.right() - 1 - col as i32;
-            for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
-                blend_pixel(canvas, canvas_width, canvas_height, x, y, pixel, coverage);
+            let dy = extent - (row as f64 + 0.5);
+            for col in 0..radius {
+                let dx = extent - (col as f64 + 0.5);
+                let coverage = coverage(extent - dx.hypot(dy) + 0.5);
+                if coverage == 0 {
+                    continue;
+                }
+
+                let left = rect.x + col as i32;
+                let right = rect.right() - 1 - col as i32;
+                for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
+                    self.blend_pixel(x, y, pixel, coverage);
+                }
             }
+        }
+    }
+
+    fn fill_rect(&mut self, rect: Rect, color: Color) {
+        let rect = rect.clamp_to_surface(self.width, self.height);
+        if rect.is_empty() {
+            return;
+        }
+
+        let pixel = color.to_argb8888();
+        let stride = self.width as usize * BYTES_PER_PIXEL;
+        let start_byte = rect.x as usize * BYTES_PER_PIXEL;
+        let span_bytes = rect.width as usize * BYTES_PER_PIXEL;
+
+        for row in rect.y as usize..rect.bottom() as usize {
+            let offset = row * stride + start_byte;
+            let Some(scanline) = self.pixels.get_mut(offset..offset + span_bytes) else {
+                return;
+            };
+            for chunk in scanline.chunks_exact_mut(BYTES_PER_PIXEL) {
+                chunk.copy_from_slice(&pixel);
+            }
+        }
+    }
+
+    fn blend_pixel(&mut self, x: i32, y: i32, pixel: [u8; 4], coverage: u8) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+
+        let offset = (y as usize * self.width as usize + x as usize) * BYTES_PER_PIXEL;
+        let Some(target) = self.pixels.get_mut(offset..offset + BYTES_PER_PIXEL) else {
+            return;
+        };
+
+        for (channel, source) in target.iter_mut().zip(pixel) {
+            *channel = lerp(*channel, source, coverage);
         }
     }
 }
@@ -113,54 +139,9 @@ fn coverage(value: f64) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-fn blend_pixel(
-    canvas: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
-    x: i32,
-    y: i32,
-    pixel: [u8; 4],
-    coverage: u8,
-) {
-    if x < 0 || y < 0 || x >= canvas_width as i32 || y >= canvas_height as i32 {
-        return;
-    }
-
-    let offset = (y as usize * canvas_width as usize + x as usize) * BYTES_PER_PIXEL;
-    let Some(target) = canvas.get_mut(offset..offset + BYTES_PER_PIXEL) else {
-        return;
-    };
-
-    for (channel, source) in target.iter_mut().zip(pixel) {
-        *channel = lerp(*channel, source, coverage);
-    }
-}
-
 fn lerp(from: u8, to: u8, t: u8) -> u8 {
     let t = t as u32;
     ((from as u32 * (255 - t) + to as u32 * t + 127) / 255) as u8
-}
-
-fn fill_rect(canvas: &mut [u8], canvas_width: u32, canvas_height: u32, rect: Rect, color: Color) {
-    let rect = rect.clamp_to_surface(canvas_width, canvas_height);
-    if rect.is_empty() {
-        return;
-    }
-
-    let pixel = color.to_argb8888();
-    let stride = canvas_width as usize * BYTES_PER_PIXEL;
-    let start_byte = rect.x as usize * BYTES_PER_PIXEL;
-    let span_bytes = rect.width as usize * BYTES_PER_PIXEL;
-
-    for row in rect.y as usize..rect.bottom() as usize {
-        let offset = row * stride + start_byte;
-        let Some(scanline) = canvas.get_mut(offset..offset + span_bytes) else {
-            return;
-        };
-        for chunk in scanline.chunks_exact_mut(BYTES_PER_PIXEL) {
-            chunk.copy_from_slice(&pixel);
-        }
-    }
 }
 
 #[cfg(test)]
