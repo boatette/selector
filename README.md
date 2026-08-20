@@ -42,6 +42,9 @@ drag_threshold = 3.0
 # outline thickness in pixels, 0 disables the outline
 border_width = 1
 
+# corner rounding in pixels, 0 is square corners
+corner_radius = 0
+
 # ask the compositor to blur what is behind the selection
 blur = false
 
@@ -51,6 +54,14 @@ border = "#4c9ed9cc"
 ```
 
 `bottom` is the load-bearing default: it puts selector above the wallpaper but beneath every ordinary window, so a drag reaches it only when the desktop under the pointer is empty. Raising it to `top` or `overlay` makes selector swallow clicks meant for your windows.
+
+### Rounded corners
+
+`corner_radius` rounds the selection box, antialiased, and is clamped to half the shorter side, so a radius larger than the selection degrades to a pill and then to a circle rather than glitching. The radius names the *outer* edge; the fill's curve is drawn concentric with it at `corner_radius - border_width`, so the outline keeps the same thickness on the curve as on the straight edges. A `border_width` wider than the radius floors the inner curve at zero, giving a square-cornered fill inside a rounded ring.
+
+With `blur = true` the region handed to the compositor follows the rounded outline too, decomposed into scanlines, so the blur does not square off the corners. A `wl_region` is rectangle algebra with no antialiasing, so its edge is a hard staircase against the painted one, half a pixel apart at worst.
+
+The selection is clamped to the output before it is drawn, so a drag pushed past a screen edge keeps its rounding against the clamped edge rather than showing a straight cut. This is the same clamp `border_width` already measures from.
 
 ### Blur
 
@@ -173,7 +184,6 @@ Rendering is software into a `wl_shm` buffer (`Argb8888`, premultiplied). There 
 
 ## TODO:
 
-- Add rounded corner support
 - Test on more wayland compositors
 - Fix issues in [Known gaps](#known-gaps)
 

@@ -78,6 +78,7 @@ pub struct Config {
     pub fill: Color,
     pub border: Color,
     pub border_width: u32,
+    pub corner_radius: u32,
     #[serde(deserialize_with = "deserialize_layer")]
     pub layer: Layer,
     pub drag_threshold: f64,
@@ -98,6 +99,7 @@ impl Default for Config {
             fill: Color::rgba(0x4c, 0x9e, 0xd9, 0x40),
             border: Color::rgba(0x4c, 0x9e, 0xd9, 0xcc),
             border_width: 1,
+            corner_radius: 0,
             layer: Layer::Bottom,
             drag_threshold: 3.0,
             blur: false,
@@ -257,6 +259,7 @@ mod tests {
         assert_eq!(config.fill, default.fill);
         assert_eq!(config.border, default.border);
         assert_eq!(config.border_width, default.border_width);
+        assert_eq!(config.corner_radius, default.corner_radius);
         assert_eq!(config.layer, default.layer);
         assert_eq!(config.drag_threshold, default.drag_threshold);
     }
@@ -422,6 +425,7 @@ mod tests {
         assert_eq!(config.fill, default.fill);
         assert_eq!(config.border, default.border);
         assert_eq!(config.border_width, default.border_width);
+        assert_eq!(config.corner_radius, default.corner_radius);
         assert_eq!(config.layer, default.layer);
         assert_eq!(config.drag_threshold, default.drag_threshold);
     }

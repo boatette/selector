@@ -54,7 +54,7 @@ impl Monitor {
         self.layer.wl_surface() == surface
     }
 
-    fn set_blur_region(&mut self, compositor: &CompositorState, wanted: Option<Rect>) {
+    fn set_blur_region(&mut self, compositor: &CompositorState, wanted: Option<Rect>, radius: u32) {
         let Some(effect) = &self.blur else { return };
         if self.blur_region == wanted {
             return;
@@ -69,7 +69,9 @@ impl Monitor {
                         return;
                     }
                 };
-                region.add(rect.x, rect.y, rect.width as i32, rect.height as i32);
+                for span in rect.rounded_spans(radius) {
+                    region.add(span.x, span.y, span.width as i32, span.height as i32);
+                }
                 effect.set_blur_region(Some(region.wl_region()));
             }
             None => effect.set_blur_region(None),
@@ -266,7 +268,7 @@ impl App {
         let blurred = rect
             .map(|rect| rect.clamp_to_surface(width, height))
             .filter(|rect| !rect.is_empty());
-        monitor.set_blur_region(compositor, blurred);
+        monitor.set_blur_region(compositor, blurred, config.corner_radius);
 
         monitor.layer.commit();
     }

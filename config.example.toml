@@ -9,6 +9,10 @@ drag_threshold = 3.0
 # outline thickness in pixels, 0 disables the outline
 border_width = 1
 
+# corner rounding in pixels, 0 is square corners
+# clamped to half the shorter side, and the fill curve stays concentric with the border
+corner_radius = 0
+
 # ask the compositor to blur what is behind the selection
 # needs a compositor implementing ext-background-effect, and only shows through a translucent fill
 blur = false

@@ -80,6 +80,13 @@ in
             description = "outline thickness in pixels, 0 disables the outline";
           };
 
+          corner_radius = lib.mkOption {
+            type = lib.types.nullOr lib.types.ints.unsigned;
+            default = null;
+            example = 8;
+            description = "corner rounding in pixels, 0 is square corners, clamped to half the shorter side";
+          };
+
           blur = lib.mkOption {
             type = lib.types.nullOr lib.types.bool;
             default = null;
@@ -114,7 +121,6 @@ in
         Documentation = "https://github.com/boatette/selector";
         PartOf = [ "graphical-session.target" ];
         After = [ "graphical-session.target" ];
-        # selector is a wayland client and has nothing to do outside a session
         ConditionEnvironment = "WAYLAND_DISPLAY";
       };
 
