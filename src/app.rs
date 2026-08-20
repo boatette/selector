@@ -1,12 +1,10 @@
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
+    compositor::{CompositorHandler, CompositorState},
     delegate_dispatch2, delegate_registry,
     output::{OutputHandler, OutputState},
-    reexports::protocols::ext::background_effect::v1::client::{
-        ext_background_effect_manager_v1, ext_background_effect_surface_v1,
-    },
+    reexports::protocols::ext::background_effect::v1::client::ext_background_effect_manager_v1,
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
@@ -25,87 +23,16 @@ use smithay_client_toolkit::{
 use wayland_client::{
     Connection, QueueHandle,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_surface},
 };
 
 use crate::config::Config;
-use crate::geometry::{Point, Rect};
-use crate::render::{self, BYTES_PER_PIXEL};
+use crate::geometry::Rect;
+use crate::monitor::{Monitor, Paint};
+use crate::render::BYTES_PER_PIXEL;
 use crate::selection::{BTN_LEFT, Selection};
 
 const NAMESPACE: &str = "selector";
-
-struct Monitor {
-    output: wl_output::WlOutput,
-    layer: LayerSurface,
-    pool: SlotPool,
-    origin: (i32, i32),
-    width: u32,
-    height: u32,
-    configured: bool,
-    dirty: bool,
-    frame_pending: bool,
-    painted: Option<Rect>,
-    blur: Option<ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1>,
-    blur_region: Option<Rect>,
-}
-
-impl Monitor {
-    fn owns(&self, surface: &wl_surface::WlSurface) -> bool {
-        self.layer.wl_surface() == surface
-    }
-
-    fn local_rect(&self, global: Option<Rect>) -> Option<Rect> {
-        let rect = global?.translate(-self.origin.0, -self.origin.1);
-        rect.overlaps_surface(self.width, self.height)
-            .then_some(rect)
-    }
-
-    fn point_to_global(&self, position: (f64, f64)) -> Point {
-        Point::new(
-            position.0 + self.origin.0 as f64,
-            position.1 + self.origin.1 as f64,
-        )
-    }
-
-    fn set_blur_region(&mut self, compositor: &CompositorState, wanted: Option<Rect>, radius: u32) {
-        let Some(effect) = &self.blur else { return };
-        if self.blur_region == wanted {
-            return;
-        }
-
-        match wanted {
-            Some(rect) => {
-                let region = match Region::new(compositor) {
-                    Ok(region) => region,
-                    Err(err) => {
-                        log::error!("failed to create a blur region: {err}");
-                        return;
-                    }
-                };
-                for span in rect.rounded_spans(radius) {
-                    let span = span.clamp_to_surface(self.width, self.height);
-                    if span.is_empty() {
-                        continue;
-                    }
-                    region.add(span.x, span.y, span.width as i32, span.height as i32);
-                }
-                effect.set_blur_region(Some(region.wl_region()));
-            }
-            None => effect.set_blur_region(None),
-        }
-
-        self.blur_region = wanted;
-    }
-}
-
-impl Drop for Monitor {
-    fn drop(&mut self) {
-        if let Some(effect) = &self.blur {
-            effect.destroy();
-        }
-    }
-}
 
 pub struct App {
     registry_state: RegistryState,
@@ -169,7 +96,7 @@ impl App {
     }
 
     fn add_monitor(&mut self, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
-        if self.monitors.iter().any(|m| m.output == output) {
+        if self.monitors.iter().any(|m| m.has_output(&output)) {
             return;
         }
 
@@ -213,20 +140,8 @@ impl App {
 
         let origin = self.output_origin(&output);
         log::info!("tracking output {name} at ({}, {})", origin.0, origin.1);
-        self.monitors.push(Monitor {
-            output,
-            layer,
-            pool,
-            origin,
-            width: 0,
-            height: 0,
-            configured: false,
-            dirty: false,
-            frame_pending: false,
-            painted: None,
-            blur,
-            blur_region: None,
-        });
+        self.monitors
+            .push(Monitor::new(output, layer, pool, origin, blur));
     }
 
     fn output_origin(&self, output: &wl_output::WlOutput) -> (i32, i32) {
@@ -236,84 +151,46 @@ impl App {
     }
 
     fn remove_monitor(&mut self, output: &wl_output::WlOutput) {
-        self.monitors.retain(|m| &m.output != output);
+        self.monitors.retain(|m| !m.has_output(output));
     }
 
     fn monitor_index(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
         self.monitors.iter().position(|m| m.owns(surface))
     }
 
-    fn sync_selection(&mut self, qh: &QueueHandle<Self>) {
-        let global = self.selection.rect();
+    fn monitors_and_paint(&mut self) -> (&mut [Monitor], Paint<'_>) {
+        let Self {
+            monitors,
+            config,
+            compositor,
+            selection,
+            ..
+        } = self;
 
-        for index in 0..self.monitors.len() {
-            let local = self.monitors[index].local_rect(global);
-            if self.monitors[index].painted == local {
-                continue;
-            }
-
-            self.monitors[index].dirty = true;
-            if !self.monitors[index].frame_pending {
-                self.draw(qh, index);
-            }
-        }
+        (
+            monitors,
+            Paint {
+                config,
+                compositor,
+                selection: selection.rect(),
+            },
+        )
     }
 
-    fn draw(&mut self, qh: &QueueHandle<Self>, index: usize) {
-        let global = self.selection.rect();
-        let config = &self.config;
-        let compositor = &self.compositor;
-        let monitor = &mut self.monitors[index];
+    fn sync_selection(&mut self, qh: &QueueHandle<Self>) {
+        let (monitors, paint) = self.monitors_and_paint();
 
-        if !monitor.configured || monitor.width == 0 || monitor.height == 0 {
-            return;
+        for monitor in monitors {
+            monitor.sync(qh, &paint);
         }
-
-        monitor.dirty = false;
-
-        let width = monitor.width;
-        let height = monitor.height;
-        let stride = width as i32 * BYTES_PER_PIXEL as i32;
-        let rect = monitor.local_rect(global);
-
-        let buffer = match monitor.pool.create_buffer(
-            width as i32,
-            height as i32,
-            stride,
-            wl_shm::Format::Argb8888,
-        ) {
-            Ok((buffer, canvas)) => {
-                render::draw(canvas, width, height, rect, config);
-                buffer
-            }
-            Err(err) => {
-                log::error!("failed to acquire a buffer: {err}");
-                return;
-            }
-        };
-
-        let surface = monitor.layer.wl_surface();
-        surface.damage_buffer(0, 0, width as i32, height as i32);
-        surface.frame(qh, FrameCallbackData(surface.clone()));
-        monitor.frame_pending = true;
-
-        if let Err(err) = buffer.attach_to(surface) {
-            log::error!("failed to attach buffer: {err}");
-            return;
-        }
-
-        monitor.set_blur_region(compositor, rect, config.corner_radius);
-        monitor.painted = rect;
-
-        monitor.layer.commit();
     }
 
     fn selection_completed(&self, rect: Rect) {
         let outputs: Vec<String> = self
             .monitors
             .iter()
-            .filter(|monitor| monitor.local_rect(Some(rect)).is_some())
-            .map(|monitor| self.output_name(&monitor.output))
+            .filter(|monitor| monitor.covers(rect))
+            .map(|monitor| self.output_name(monitor.output()))
             .collect();
 
         let names = if outputs.is_empty() {
@@ -362,10 +239,8 @@ impl CompositorHandler for App {
             return;
         };
 
-        self.monitors[index].frame_pending = false;
-        if self.monitors[index].dirty {
-            self.draw(qh, index);
-        }
+        let (monitors, paint) = self.monitors_and_paint();
+        monitors[index].frame_done(qh, &paint);
     }
 
     fn surface_enter(
@@ -408,16 +283,13 @@ impl OutputHandler for App {
         output: wl_output::WlOutput,
     ) {
         let origin = self.output_origin(&output);
-        let Some(monitor) = self.monitors.iter_mut().find(|m| m.output == output) else {
+        let Some(monitor) = self.monitors.iter_mut().find(|m| m.has_output(&output)) else {
             return;
         };
 
-        if monitor.origin == origin {
-            return;
+        if monitor.set_origin(origin) {
+            self.sync_selection(qh);
         }
-
-        monitor.origin = origin;
-        self.sync_selection(qh);
     }
 
     fn output_destroyed(
@@ -432,7 +304,7 @@ impl OutputHandler for App {
 
 impl LayerShellHandler for App {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
-        self.monitors.retain(|m| &m.layer != layer);
+        self.monitors.retain(|m| !m.has_layer(layer));
 
         if self.monitors.is_empty() {
             log::info!("last layer surface closed, exiting");
@@ -448,7 +320,7 @@ impl LayerShellHandler for App {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        let Some(index) = self.monitors.iter().position(|m| &m.layer == layer) else {
+        let Some(index) = self.monitors.iter().position(|m| m.has_layer(layer)) else {
             return;
         };
 
@@ -458,13 +330,10 @@ impl LayerShellHandler for App {
             return;
         }
 
-        let monitor = &mut self.monitors[index];
-        monitor.width = width;
-        monitor.height = height;
-        monitor.configured = true;
-        monitor.frame_pending = false;
+        self.monitors[index].configure(width, height);
 
-        self.draw(qh, index);
+        let (monitors, paint) = self.monitors_and_paint();
+        monitors[index].draw(qh, &paint);
     }
 }
 

@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod geometry;
+mod monitor;
 mod render;
 mod selection;
 
