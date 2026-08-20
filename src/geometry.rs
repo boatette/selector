@@ -105,6 +105,14 @@ impl Rect {
         spans
     }
 
+    pub fn translate(&self, dx: i32, dy: i32) -> Self {
+        Self {
+            x: self.x.saturating_add(dx),
+            y: self.y.saturating_add(dy),
+            ..*self
+        }
+    }
+
     pub fn clamp_to_surface(&self, width: u32, height: u32) -> Self {
         let left = self.x.clamp(0, width as i32);
         let top = self.y.clamp(0, height as i32);
@@ -221,6 +229,13 @@ mod tests {
         for span in spans {
             assert!(span.right() <= r.right() && span.bottom() <= r.bottom());
         }
+    }
+
+    #[test]
+    fn translating_moves_the_rect_without_resizing_it() {
+        let r = Rect::new(10, 20, 30, 40);
+        assert_eq!(r.translate(-1920, 5), Rect::new(-1910, 25, 30, 40));
+        assert_eq!(r.translate(0, 0), r);
     }
 
     #[test]

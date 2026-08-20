@@ -13,8 +13,10 @@ pub fn draw(
     canvas.fill(0);
 
     let Some(rect) = rect else { return };
-    let rect = rect.clamp_to_surface(canvas_width, canvas_height);
-    if rect.is_empty() {
+    if rect
+        .clamp_to_surface(canvas_width, canvas_height)
+        .is_empty()
+    {
         return;
     }
 
@@ -329,6 +331,30 @@ mod tests {
         draw(&mut c, W, H, Some(Rect::new(6, 0, 8, 4)), &cfg);
 
         assert_eq!(pixel(&c, 0, 1), [0; 4], "must not wrap onto the next row");
+    }
+
+    #[test]
+    fn an_overhanging_selection_keeps_its_geometry() {
+        let cfg = Config {
+            border_width: 1,
+            corner_radius: 0,
+            ..config()
+        };
+
+        let mut c = canvas();
+        draw(&mut c, W, H, Some(Rect::new(-4, 2, 8, 4)), &cfg);
+
+        assert_eq!(
+            pixel(&c, 0, 3),
+            cfg.fill.to_argb8888(),
+            "interior, not border"
+        );
+        assert_eq!(
+            pixel(&c, 3, 3),
+            cfg.border.to_argb8888(),
+            "the right border"
+        );
+        assert_eq!(pixel(&c, 4, 3), [0; 4], "past the selection");
     }
 
     #[test]

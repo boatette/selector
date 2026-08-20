@@ -39,12 +39,13 @@ struct Monitor {
     output: wl_output::WlOutput,
     layer: LayerSurface,
     pool: SlotPool,
-    selection: Selection,
+    origin: (i32, i32),
     width: u32,
     height: u32,
     configured: bool,
     dirty: bool,
     frame_pending: bool,
+    painted: Option<Option<Rect>>,
     blur: Option<ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1>,
     blur_region: Option<Rect>,
 }
@@ -52,6 +53,18 @@ struct Monitor {
 impl Monitor {
     fn owns(&self, surface: &wl_surface::WlSurface) -> bool {
         self.layer.wl_surface() == surface
+    }
+
+    fn local_rect(&self, global: Option<Rect>) -> Option<Rect> {
+        let rect = global?.translate(-self.origin.0, -self.origin.1);
+        (!rect.clamp_to_surface(self.width, self.height).is_empty()).then_some(rect)
+    }
+
+    fn point_to_global(&self, position: (f64, f64)) -> Point {
+        Point::new(
+            position.0 + self.origin.0 as f64,
+            position.1 + self.origin.1 as f64,
+        )
     }
 
     fn set_blur_region(&mut self, compositor: &CompositorState, wanted: Option<Rect>, radius: u32) {
@@ -70,6 +83,10 @@ impl Monitor {
                     }
                 };
                 for span in rect.rounded_spans(radius) {
+                    let span = span.clamp_to_surface(self.width, self.height);
+                    if span.is_empty() {
+                        continue;
+                    }
                     region.add(span.x, span.y, span.width as i32, span.height as i32);
                 }
                 effect.set_blur_region(Some(region.wl_region()));
@@ -100,6 +117,7 @@ pub struct App {
 
     config: Config,
     blur: bool,
+    selection: Selection,
     monitors: Vec<Monitor>,
     pointer: Option<wl_pointer::WlPointer>,
     exit: bool,
@@ -129,6 +147,7 @@ impl App {
             compositor,
             layer_shell,
             background_effect,
+            selection: Selection::new(config.drag_threshold),
             config,
             blur,
             monitors: Vec::new(),
@@ -191,20 +210,29 @@ impl App {
             }
         };
 
-        log::info!("tracking output {name}");
+        let origin = self.output_origin(&output);
+        log::info!("tracking output {name} at ({}, {})", origin.0, origin.1);
         self.monitors.push(Monitor {
             output,
             layer,
             pool,
-            selection: Selection::new(self.config.drag_threshold),
+            origin,
             width: 0,
             height: 0,
             configured: false,
             dirty: false,
             frame_pending: false,
+            painted: None,
             blur,
             blur_region: None,
         });
+    }
+
+    fn output_origin(&self, output: &wl_output::WlOutput) -> (i32, i32) {
+        self.output_state
+            .info(output)
+            .map(|info| info.logical_position.unwrap_or(info.location))
+            .unwrap_or((0, 0))
     }
 
     fn remove_monitor(&mut self, output: &wl_output::WlOutput) {
@@ -215,15 +243,24 @@ impl App {
         self.monitors.iter().position(|m| m.owns(surface))
     }
 
-    fn request_redraw(&mut self, qh: &QueueHandle<Self>, index: usize) {
-        let monitor = &mut self.monitors[index];
-        monitor.dirty = true;
-        if !monitor.frame_pending {
-            self.draw(qh, index);
+    fn sync_selection(&mut self, qh: &QueueHandle<Self>) {
+        let global = self.selection.rect();
+
+        for index in 0..self.monitors.len() {
+            let local = self.monitors[index].local_rect(global);
+            if self.monitors[index].painted == Some(local) {
+                continue;
+            }
+
+            self.monitors[index].dirty = true;
+            if !self.monitors[index].frame_pending {
+                self.draw(qh, index);
+            }
         }
     }
 
     fn draw(&mut self, qh: &QueueHandle<Self>, index: usize) {
+        let global = self.selection.rect();
         let config = &self.config;
         let compositor = &self.compositor;
         let monitor = &mut self.monitors[index];
@@ -237,7 +274,7 @@ impl App {
         let width = monitor.width;
         let height = monitor.height;
         let stride = width as i32 * BYTES_PER_PIXEL as i32;
-        let rect = monitor.selection.rect();
+        let rect = monitor.local_rect(global);
 
         let buffer = match monitor.pool.create_buffer(
             width as i32,
@@ -265,19 +302,28 @@ impl App {
             return;
         }
 
-        let blurred = rect
-            .map(|rect| rect.clamp_to_surface(width, height))
-            .filter(|rect| !rect.is_empty());
-        monitor.set_blur_region(compositor, blurred, config.corner_radius);
+        monitor.set_blur_region(compositor, rect, config.corner_radius);
+        monitor.painted = Some(rect);
 
         monitor.layer.commit();
     }
 
-    fn selection_completed(&mut self, index: usize, rect: Rect) {
-        let name = self.output_name(&self.monitors[index].output);
+    fn selection_completed(&self, rect: Rect) {
+        let outputs: Vec<String> = self
+            .monitors
+            .iter()
+            .filter(|monitor| monitor.local_rect(Some(rect)).is_some())
+            .map(|monitor| self.output_name(&monitor.output))
+            .collect();
+
+        let names = if outputs.is_empty() {
+            "<offscreen>".to_owned()
+        } else {
+            outputs.join(", ")
+        };
 
         log::info!(
-            "selection on {name}: {}x{} at ({}, {})",
+            "selection on {names}: {}x{} at ({}, {})",
             rect.width,
             rect.height,
             rect.x,
@@ -359,10 +405,20 @@ impl OutputHandler for App {
     fn update_output(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
     ) {
-        // a resolution change arrives as a fresh configure on the layer surface
+        let origin = self.output_origin(&output);
+        let Some(monitor) = self.monitors.iter_mut().find(|m| m.output == output) else {
+            return;
+        };
+
+        if monitor.origin == origin {
+            return;
+        }
+
+        monitor.origin = origin;
+        self.sync_selection(qh);
     }
 
     fn output_destroyed(
@@ -408,6 +464,7 @@ impl LayerShellHandler for App {
         monitor.height = height;
         monitor.configured = true;
         monitor.frame_pending = false;
+        monitor.painted = None;
 
         self.draw(qh, index);
     }
@@ -467,37 +524,38 @@ impl PointerHandler for App {
             let Some(index) = self.monitor_index(&event.surface) else {
                 continue;
             };
-            let at = Point::from(event.position);
+            let at = self.monitors[index].point_to_global(event.position);
 
             let redraw = match event.kind {
                 PointerEventKind::Press {
                     button: BTN_LEFT, ..
-                } => self.monitors[index].selection.press(at),
-                PointerEventKind::Motion { .. } => self.monitors[index].selection.motion(at),
+                } => self.selection.press(at),
+                PointerEventKind::Motion { .. } => self.selection.motion(at),
                 PointerEventKind::Release {
                     button: BTN_LEFT, ..
                 } => {
-                    let motion_redraw = self.monitors[index].selection.motion(at);
-                    let (rect, release_redraw) = self.monitors[index].selection.release();
+                    let motion_redraw = self.selection.motion(at);
+                    let (rect, release_redraw) = self.selection.release();
 
                     if let Some(rect) = rect {
-                        let clamped = rect.clamp_to_surface(
-                            self.monitors[index].width,
-                            self.monitors[index].height,
-                        );
-                        self.selection_completed(index, clamped);
+                        self.selection_completed(rect);
                     }
 
                     motion_redraw.or(release_redraw)
                 }
-                PointerEventKind::Press { .. } => self.monitors[index].selection.cancel(),
-                PointerEventKind::Leave { .. } => self.monitors[index].selection.cancel(),
+                PointerEventKind::Press { .. } => self.selection.cancel(),
+                PointerEventKind::Leave { .. } => {
+                    if self.selection.rect().is_some() {
+                        continue;
+                    }
+                    self.selection.cancel()
+                }
                 PointerEventKind::Enter { .. } | PointerEventKind::Axis { .. } => continue,
                 PointerEventKind::Release { .. } => continue,
             };
 
             if redraw.is_needed() {
-                self.request_redraw(qh, index);
+                self.sync_selection(qh);
             }
         }
     }

@@ -61,7 +61,7 @@ border = "#4c9ed9cc"
 
 With `blur = true` the region handed to the compositor follows the rounded outline too, decomposed into scanlines, so the blur does not square off the corners. A `wl_region` is rectangle algebra with no antialiasing, so its edge is a hard staircase against the painted one, half a pixel apart at worst.
 
-The selection is clamped to the output before it is drawn, so a drag pushed past a screen edge keeps its rounding against the clamped edge rather than showing a straight cut. This is the same clamp `border_width` already measures from.
+A selection that runs past a screen edge keeps its true geometry: each output draws the part of the box that falls on it and clips the rest, so the corners stay where the drag put them instead of being re-rounded against the edge. On the last screen in the layout that means a straight cut at the edge, and on a monitor in the middle of a cross-screen drag it means no corner at all.
 
 ### Blur
 
@@ -175,9 +175,10 @@ selector binds three globals, wl_compositor, wl_shm, and zwlr_layer_shell_v1, pl
 
 Rendering is software into a `wl_shm` buffer (`Argb8888`, premultiplied). There is no GPU dependency, and the surface is fully transparent whenever no drag is in progress.
 
+There is one selection for the whole layout, held in global compositor coordinates. Pointer events are surface-local, so each event is lifted into that space using the output's position from xdg-output (falling back to wl_output's geometry), and every surface subtracts its own origin again to draw. A drag therefore survives crossing a monitor boundary: the button holds an implicit grab on the surface it started on, whose motion coordinates simply run off the edge, and each output repaints whenever its own view of the selection changes. Should a compositor break the grab and hand focus to the next output instead, the drag continues there rather than being cancelled.
+
 ## Known gaps
 
-- A selection is confined to the output it started on; dragging across monitors needs output-layout awareness.
 - Completed selections are logged only. `App::selection_completed` is the seam where they will be reported.
 - Every frame repaints the full surface rather than tracking damage.
 - The config is read once at startup; there is no reload and no CLI flags.
