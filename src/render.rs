@@ -8,6 +8,7 @@ pub fn draw(
     canvas_width: u32,
     canvas_height: u32,
     rect: Option<Rect>,
+    stale: Option<Rect>,
     config: &Config,
 ) {
     Canvas {
@@ -15,8 +16,10 @@ pub fn draw(
         width: canvas_width,
         height: canvas_height,
     }
-    .draw(rect, config);
+    .draw(rect, stale, config);
 }
+
+const BLANK: Color = Color::rgba(0, 0, 0, 0);
 
 struct Canvas<'a> {
     pixels: &'a mut [u8],
@@ -25,8 +28,10 @@ struct Canvas<'a> {
 }
 
 impl Canvas<'_> {
-    fn draw(&mut self, rect: Option<Rect>, config: &Config) {
-        self.pixels.fill(0);
+    fn draw(&mut self, rect: Option<Rect>, stale: Option<Rect>, config: &Config) {
+        if let Some(stale) = stale {
+            self.fill_rect(stale, BLANK);
+        }
 
         let Some(rect) = rect else { return };
         if !rect.overlaps_surface(self.width, self.height) {
@@ -105,6 +110,16 @@ impl Canvas<'_> {
 
         let pixel = color.to_argb8888();
         let stride = self.width as usize * BYTES_PER_PIXEL;
+
+        if rect.x == 0 && rect.width == self.width {
+            let start = rect.y as usize * stride;
+            let end = rect.bottom() as usize * stride;
+            if let Some(block) = self.pixels.get_mut(start..end) {
+                fill_pixels(block, pixel);
+            }
+            return;
+        }
+
         let start_byte = rect.x as usize * BYTES_PER_PIXEL;
         let span_bytes = rect.width as usize * BYTES_PER_PIXEL;
 
@@ -113,9 +128,7 @@ impl Canvas<'_> {
             let Some(scanline) = self.pixels.get_mut(offset..offset + span_bytes) else {
                 return;
             };
-            for chunk in scanline.chunks_exact_mut(BYTES_PER_PIXEL) {
-                chunk.copy_from_slice(&pixel);
-            }
+            fill_pixels(scanline, pixel);
         }
     }
 
@@ -132,6 +145,21 @@ impl Canvas<'_> {
         for (channel, source) in target.iter_mut().zip(pixel) {
             *channel = lerp(*channel, source, coverage);
         }
+    }
+}
+
+fn fill_pixels(bytes: &mut [u8], pixel: [u8; 4]) {
+    if let [b, g, r, a] = pixel
+        && b == g
+        && g == r
+        && r == a
+    {
+        bytes.fill(b);
+        return;
+    }
+
+    for chunk in bytes.chunks_exact_mut(BYTES_PER_PIXEL) {
+        chunk.copy_from_slice(&pixel);
     }
 }
 
@@ -155,6 +183,10 @@ mod tests {
         vec![0xAB; (W * H) as usize * BYTES_PER_PIXEL]
     }
 
+    fn all(w: u32, h: u32) -> Option<Rect> {
+        Some(Rect::new(0, 0, w, h))
+    }
+
     fn pixel(canvas: &[u8], x: u32, y: u32) -> [u8; 4] {
         let offset = (y * W + x) as usize * BYTES_PER_PIXEL;
         canvas[offset..offset + 4].try_into().unwrap()
@@ -172,7 +204,7 @@ mod tests {
     #[test]
     fn no_selection_clears_stale_pixels() {
         let mut c = canvas();
-        draw(&mut c, W, H, None, &config());
+        draw(&mut c, W, H, None, all(W, H), &config());
         assert!(c.iter().all(|&b| b == 0));
     }
 
@@ -180,7 +212,7 @@ mod tests {
     fn selection_paints_border_outside_and_fill_inside() {
         let mut c = canvas();
         let cfg = config();
-        draw(&mut c, W, H, Some(Rect::new(2, 2, 4, 4)), &cfg);
+        draw(&mut c, W, H, Some(Rect::new(2, 2, 4, 4)), all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 2, 2), cfg.border.to_argb8888(), "top-left border");
         assert_eq!(
@@ -200,7 +232,7 @@ mod tests {
             border_width: 4,
             ..config()
         };
-        draw(&mut c, W, H, Some(Rect::new(1, 1, 2, 2)), &cfg);
+        draw(&mut c, W, H, Some(Rect::new(1, 1, 2, 2)), all(W, H), &cfg);
 
         for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
             assert_eq!(pixel(&c, x, y), cfg.border.to_argb8888());
@@ -214,7 +246,7 @@ mod tests {
             border_width: 0,
             ..config()
         };
-        draw(&mut c, W, H, Some(Rect::new(2, 2, 4, 4)), &cfg);
+        draw(&mut c, W, H, Some(Rect::new(2, 2, 4, 4)), all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 2, 2), cfg.fill.to_argb8888());
         assert_eq!(pixel(&c, 5, 5), cfg.fill.to_argb8888());
@@ -245,11 +277,11 @@ mod tests {
         let selection = Some(Rect::new(0, 0, w, h));
 
         let mut c = sized_canvas(w, h);
-        draw(&mut c, w, h, selection, &square);
+        draw(&mut c, w, h, selection, all(w, h), &square);
         assert_eq!(pixel_at(&c, w, 0, 0), square.fill.to_argb8888());
 
         let mut c = sized_canvas(w, h);
-        draw(&mut c, w, h, selection, &rounded);
+        draw(&mut c, w, h, selection, all(w, h), &rounded);
         assert_eq!(pixel_at(&c, w, 0, 0), [0; 4], "the corner is cut away");
         assert_eq!(
             pixel_at(&c, w, 8, 0),
@@ -273,7 +305,7 @@ mod tests {
 
         let (w, h) = (24, 24);
         let mut c = sized_canvas(w, h);
-        draw(&mut c, w, h, Some(Rect::new(0, 0, w, h)), &cfg);
+        draw(&mut c, w, h, Some(Rect::new(0, 0, w, h)), all(w, h), &cfg);
 
         let border = cfg.border.to_argb8888();
         let fill = cfg.fill.to_argb8888();
@@ -294,7 +326,7 @@ mod tests {
         };
 
         let mut c = canvas();
-        draw(&mut c, W, H, Some(Rect::new(0, 0, W, H)), &cfg);
+        draw(&mut c, W, H, Some(Rect::new(0, 0, W, H)), all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 0, 0), [0; 4], "a circle has no corner");
         assert_eq!(pixel(&c, 4, 4), cfg.fill.to_argb8888(), "centre is filled");
@@ -309,7 +341,7 @@ mod tests {
         };
 
         let mut c = canvas();
-        draw(&mut c, W, H, Some(Rect::new(6, 0, 8, 4)), &cfg);
+        draw(&mut c, W, H, Some(Rect::new(6, 0, 8, 4)), all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 0, 1), [0; 4], "must not wrap onto the next row");
     }
@@ -323,7 +355,7 @@ mod tests {
         };
 
         let mut c = canvas();
-        draw(&mut c, W, H, Some(Rect::new(-4, 2, 8, 4)), &cfg);
+        draw(&mut c, W, H, Some(Rect::new(-4, 2, 8, 4)), all(W, H), &cfg);
 
         assert_eq!(
             pixel(&c, 0, 3),
@@ -345,9 +377,64 @@ mod tests {
             border_width: 0,
             ..config()
         };
-        draw(&mut c, W, H, Some(Rect::new(6, 0, 8, 1)), &cfg);
+        draw(&mut c, W, H, Some(Rect::new(6, 0, 8, 1)), all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 7, 0), cfg.fill.to_argb8888());
         assert_eq!(pixel(&c, 0, 1), [0; 4], "must not wrap onto the next row");
+    }
+
+    #[test]
+    fn erasing_the_stale_region_leaves_nothing_of_the_previous_frame() {
+        let cfg = Config {
+            border_width: 0,
+            ..config()
+        };
+        let mut c = canvas();
+
+        let first = Rect::new(1, 1, 3, 3);
+        draw(&mut c, W, H, Some(first), all(W, H), &cfg);
+
+        let second = Rect::new(4, 4, 3, 3);
+        draw(&mut c, W, H, Some(second), Some(first), &cfg);
+
+        assert_eq!(pixel(&c, 2, 2), [0; 4], "the old selection is gone");
+        assert_eq!(
+            pixel(&c, 5, 5),
+            cfg.fill.to_argb8888(),
+            "the new one is drawn"
+        );
+    }
+
+    #[test]
+    fn an_overlapping_move_does_not_erase_the_new_selection() {
+        let cfg = Config {
+            border_width: 0,
+            ..config()
+        };
+        let mut c = canvas();
+
+        let first = Rect::new(1, 1, 4, 4);
+        draw(&mut c, W, H, Some(first), all(W, H), &cfg);
+
+        let second = Rect::new(2, 2, 4, 4);
+        draw(&mut c, W, H, Some(second), Some(first), &cfg);
+
+        for (x, y) in [(2, 2), (3, 3), (5, 5)] {
+            assert_eq!(pixel(&c, x, y), cfg.fill.to_argb8888(), "({x}, {y})");
+        }
+        assert_eq!(pixel(&c, 1, 1), [0; 4], "the vacated corner is cleared");
+    }
+
+    #[test]
+    fn no_stale_region_leaves_the_canvas_untouched_outside_the_selection() {
+        let cfg = Config {
+            border_width: 0,
+            ..config()
+        };
+        let mut c = canvas();
+        draw(&mut c, W, H, Some(Rect::new(2, 2, 2, 2)), None, &cfg);
+
+        assert_eq!(pixel(&c, 2, 2), cfg.fill.to_argb8888());
+        assert_eq!(pixel(&c, 0, 0), [0xAB; 4], "nothing else was erased");
     }
 }

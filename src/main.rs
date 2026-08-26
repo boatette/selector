@@ -1,12 +1,5 @@
-mod app;
-mod config;
-mod geometry;
-mod monitor;
-mod render;
-mod selection;
-
 use anyhow::Result;
-use config::Config;
+use selector::{app, config::Config};
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(

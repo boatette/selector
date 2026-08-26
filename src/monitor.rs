@@ -1,8 +1,10 @@
+use std::time::Instant;
+
 use smithay_client_toolkit::{
     compositor::{CompositorState, FrameCallbackData, Region},
     reexports::protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1,
     shell::{WaylandSurface, wlr_layer::LayerSurface},
-    shm::slot::SlotPool,
+    shm::slot::{Buffer, SlotPool},
 };
 use wayland_client::{
     QueueHandle,
@@ -16,6 +18,13 @@ use crate::render::{self, BYTES_PER_PIXEL};
 
 type BlurSurface = ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
 
+const FRAMES: usize = 2;
+
+struct Frame {
+    buffer: Buffer,
+    painted: Option<Rect>,
+}
+
 pub struct Paint<'a> {
     pub config: &'a Config,
     pub compositor: &'a CompositorState,
@@ -26,6 +35,7 @@ pub struct Monitor {
     output: wl_output::WlOutput,
     layer: LayerSurface,
     pool: SlotPool,
+    frames: Vec<Frame>,
     origin: (i32, i32),
     width: u32,
     height: u32,
@@ -35,6 +45,7 @@ pub struct Monitor {
     painted: Option<Rect>,
     blur: Option<BlurSurface>,
     blur_region: Option<Rect>,
+    last_draw: Option<Instant>,
 }
 
 impl Monitor {
@@ -49,6 +60,7 @@ impl Monitor {
             output,
             layer,
             pool,
+            frames: Vec::new(),
             origin,
             width: 0,
             height: 0,
@@ -58,6 +70,7 @@ impl Monitor {
             painted: None,
             blur,
             blur_region: None,
+            last_draw: None,
         }
     }
 
@@ -83,11 +96,63 @@ impl Monitor {
         moved
     }
 
-    pub const fn configure(&mut self, width: u32, height: u32) {
+    pub fn configure(&mut self, width: u32, height: u32) {
+        let resized = (self.width, self.height) != (width, height);
+
         self.width = width;
         self.height = height;
         self.configured = true;
         self.frame_pending = false;
+
+        if resized || self.frames.is_empty() {
+            self.build_frames();
+        }
+    }
+
+    fn build_frames(&mut self) {
+        self.frames.clear();
+        self.painted = None;
+
+        let (width, height) = (self.width, self.height);
+        let stride = width as i32 * BYTES_PER_PIXEL as i32;
+        let len = height as usize * stride as usize;
+
+        if let Err(err) = self.pool.resize(len * FRAMES) {
+            log::error!("failed to size the shm pool: {err}");
+            return;
+        }
+
+        for _ in 0..FRAMES {
+            let slot = match self.pool.new_slot(len) {
+                Ok(slot) => slot,
+                Err(err) => {
+                    log::error!("failed to allocate a buffer slot: {err}");
+                    return;
+                }
+            };
+
+            match self.pool.create_buffer_in(
+                &slot,
+                width as i32,
+                height as i32,
+                stride,
+                wl_shm::Format::Argb8888,
+            ) {
+                Ok(buffer) => self.frames.push(Frame {
+                    painted: Some(Rect::new(0, 0, width, height)),
+                    buffer,
+                }),
+                Err(err) => {
+                    log::error!("failed to create a buffer: {err}");
+                    return;
+                }
+            }
+        }
+    }
+
+    fn free_frame(&mut self) -> Option<usize> {
+        let Self { pool, frames, .. } = self;
+        (0..frames.len()).find(|&i| pool.canvas(&frames[i].buffer).is_some())
     }
 
     pub fn local_rect(&self, selection: Option<Rect>) -> Option<Rect> {
@@ -132,32 +197,47 @@ impl Monitor {
 
         self.dirty = false;
 
+        let timing = log::log_enabled!(log::Level::Debug).then(Instant::now);
+
         let (width, height) = (self.width, self.height);
-        let stride = width as i32 * BYTES_PER_PIXEL as i32;
         let rect = self.local_rect(paint.selection);
 
-        let buffer = match self.pool.create_buffer(
-            width as i32,
-            height as i32,
-            stride,
-            wl_shm::Format::Argb8888,
-        ) {
-            Ok((buffer, canvas)) => {
-                render::draw(canvas, width, height, rect, paint.config);
-                buffer
+        let Some(index) = self.free_frame() else {
+            self.dirty = true;
+            if !self.frame_pending {
+                let surface = self.layer.wl_surface();
+                surface.frame(qh, FrameCallbackData(surface.clone()));
+                self.frame_pending = true;
+                self.layer.commit();
             }
-            Err(err) => {
-                log::error!("failed to acquire a buffer: {err}");
-                return;
-            }
+            return;
         };
 
+        let Self { pool, frames, .. } = self;
+        let frame = &mut frames[index];
+        let stale = frame.painted;
+
+        let Some(canvas) = pool.canvas(&frame.buffer) else {
+            log::error!("buffer {index} became busy while drawing");
+            return;
+        };
+
+        render::draw(canvas, width, height, rect, stale, paint.config);
+        frame.painted = rect;
+
         let surface = self.layer.wl_surface();
-        surface.damage_buffer(0, 0, width as i32, height as i32);
+
+        match damage(self.painted, rect, width, height) {
+            Some(area) => {
+                surface.damage_buffer(area.x, area.y, area.width as i32, area.height as i32)
+            }
+            None => surface.damage_buffer(0, 0, width as i32, height as i32),
+        }
+
         surface.frame(qh, FrameCallbackData(surface.clone()));
         self.frame_pending = true;
 
-        if let Err(err) = buffer.attach_to(surface) {
+        if let Err(err) = self.frames[index].buffer.attach_to(surface) {
             log::error!("failed to attach buffer: {err}");
             return;
         }
@@ -166,6 +246,27 @@ impl Monitor {
         self.painted = rect;
 
         self.layer.commit();
+
+        if let Some(started) = timing {
+            self.log_frame(started);
+        }
+    }
+
+    fn log_frame(&mut self, started: Instant) {
+        let elapsed = started.elapsed();
+        let gap = self.last_draw.replace(started).map(|last| started - last);
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+
+        log::debug!(
+            "drew {}x{} in {:.3}ms{}",
+            self.width,
+            self.height,
+            ms(elapsed),
+            match gap {
+                Some(gap) => format!(", {:.3}ms since the last frame", ms(gap)),
+                None => String::new(),
+            }
+        );
     }
 
     fn set_blur_region(&mut self, compositor: &CompositorState, wanted: Option<Rect>, radius: u32) {
@@ -197,6 +298,16 @@ impl Monitor {
 
         self.blur_region = wanted;
     }
+}
+
+fn damage(was: Option<Rect>, now: Option<Rect>, width: u32, height: u32) -> Option<Rect> {
+    let area = match (was, now) {
+        (Some(was), Some(now)) => was.union(now),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => return None,
+    };
+
+    Some(area.grow(1).clamp_to_surface(width, height))
 }
 
 impl Drop for Monitor {

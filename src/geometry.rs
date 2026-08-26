@@ -107,6 +107,36 @@ impl Rect {
         }
     }
 
+    pub fn union(&self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return *self;
+        }
+
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = self.right().max(other.right());
+        let bottom = self.bottom().max(other.bottom());
+
+        Self {
+            x,
+            y,
+            width: right.saturating_sub(x) as u32,
+            height: bottom.saturating_sub(y) as u32,
+        }
+    }
+
+    pub const fn grow(&self, margin: u32) -> Self {
+        Self {
+            x: self.x.saturating_sub(margin as i32),
+            y: self.y.saturating_sub(margin as i32),
+            width: self.width.saturating_add(margin * 2),
+            height: self.height.saturating_add(margin * 2),
+        }
+    }
+
     pub fn overlaps_surface(&self, width: u32, height: u32) -> bool {
         !self.clamp_to_surface(width, height).is_empty()
     }
@@ -249,5 +279,32 @@ mod tests {
         assert!(!Rect::new(100, 100, 10, 10).overlaps_surface(20, 20));
         assert!(!Rect::new(20, 0, 10, 10).overlaps_surface(20, 20));
         assert!(!Rect::new(0, 0, 0, 0).overlaps_surface(20, 20));
+    }
+
+    #[test]
+    fn a_union_covers_both_rects() {
+        let a = Rect::new(0, 0, 10, 10);
+        let b = Rect::new(20, 5, 10, 10);
+        assert_eq!(a.union(b), Rect::new(0, 0, 30, 15));
+        assert_eq!(a.union(b), b.union(a));
+    }
+
+    #[test]
+    fn a_union_with_an_empty_rect_is_the_other_rect() {
+        let a = Rect::new(3, 4, 10, 10);
+        assert_eq!(a.union(Rect::new(0, 0, 0, 0)), a);
+        assert_eq!(Rect::new(0, 0, 0, 0).union(a), a);
+    }
+
+    #[test]
+    fn a_union_of_nested_rects_is_the_outer_one() {
+        let outer = Rect::new(0, 0, 20, 20);
+        assert_eq!(outer.union(Rect::new(5, 5, 4, 4)), outer);
+    }
+
+    #[test]
+    fn growing_expands_on_every_side() {
+        assert_eq!(Rect::new(5, 5, 10, 10).grow(2), Rect::new(3, 3, 14, 14));
+        assert_eq!(Rect::new(5, 5, 10, 10).grow(0), Rect::new(5, 5, 10, 10));
     }
 }
