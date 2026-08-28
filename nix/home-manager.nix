@@ -126,7 +126,7 @@ in
 
       Service = {
         ExecStart = lib.getExe cfg.package;
-        Restart = "on-failure";
+        Restart = "always";
         RestartSec = 1;
       };
 

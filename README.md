@@ -22,7 +22,7 @@ Outside Nix all you need is a Rust toolchain (edition 2024, so 1.85+).
 RUST_LOG=selector=debug cargo run
 ```
 
-selector runs in the foreground until its surfaces are closed. Drag with the left button on empty desktop.
+selector runs in the foreground until you kill it. Drag with the left button on empty desktop. Outputs coming and going are routine: when a screen blanks, sleeps or is unplugged, selector drops that surface and takes the output again when it returns.
 
 ## Configuration
 

@@ -48,7 +48,6 @@ pub struct App {
     selection: Selection,
     monitors: Vec<Monitor>,
     pointer: Option<wl_pointer::WlPointer>,
-    exit: bool,
 }
 
 impl App {
@@ -80,12 +79,7 @@ impl App {
             blur,
             monitors: Vec::new(),
             pointer: None,
-            exit: false,
         })
-    }
-
-    pub const fn should_exit(&self) -> bool {
-        self.exit
     }
 
     fn output_name(&self, output: &wl_output::WlOutput) -> String {
@@ -303,12 +297,26 @@ impl OutputHandler for App {
 }
 
 impl LayerShellHandler for App {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
-        self.monitors.retain(|m| !m.has_layer(layer));
+    fn closed(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        let Some(index) = self.monitors.iter().position(|m| m.has_layer(layer)) else {
+            return;
+        };
 
-        if self.monitors.is_empty() {
-            log::info!("last layer surface closed, exiting");
-            self.exit = true;
+        let monitor = self.monitors.remove(index);
+        let output = monitor.output().clone();
+        let configured = monitor.is_configured();
+        let name = self.output_name(&output);
+        drop(monitor);
+
+        if self.output_state.info(&output).is_none() {
+            log::info!("surface on {name} closed with its output, waiting for it to come back");
+        } else if configured {
+            log::info!("compositor closed the surface on {name}, taking the output again");
+            self.add_monitor(qh, output);
+        } else {
+            log::warn!(
+                "compositor closed the surface on {name} before configuring it, leaving that output alone"
+            );
         }
     }
 
@@ -482,14 +490,12 @@ pub fn run(config: Config) -> Result<()> {
         .context("initial roundtrip failed")?;
 
     if app.monitors.is_empty() {
-        anyhow::bail!("no outputs available");
+        log::warn!("no outputs yet, waiting for one to appear");
     }
 
-    while !app.should_exit() {
+    loop {
         event_queue
             .blocking_dispatch(&mut app)
             .context("wayland dispatch failed")?;
     }
-
-    Ok(())
 }

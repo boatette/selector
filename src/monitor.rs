@@ -78,6 +78,10 @@ impl Monitor {
         &self.output
     }
 
+    pub const fn is_configured(&self) -> bool {
+        self.configured
+    }
+
     pub fn has_output(&self, output: &wl_output::WlOutput) -> bool {
         &self.output == output
     }
