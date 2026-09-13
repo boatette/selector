@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use selector::config::{Color, Config};
 use selector::geometry::Rect;
-use selector::render::{self, BYTES_PER_PIXEL};
+use selector::render::{self, BYTES_PER_PIXEL, OPAQUE};
 
 const FRAME_BUDGET: Duration = Duration::from_nanos(6_944_444);
 
@@ -118,7 +118,7 @@ fn main() {
 
         for (name, rect, cfg) in scenarios {
             measure(&mut canvas, |canvas| {
-                render::draw(canvas, width, height, black_box(rect), cold, cfg)
+                render::draw(canvas, width, height, black_box(rect), OPAQUE, cold, cfg)
             })
             .report(name);
         }
@@ -134,6 +134,7 @@ fn main() {
                 width,
                 height,
                 black_box(Some(rect)),
+                OPAQUE,
                 previous,
                 &square,
             );
@@ -151,6 +152,7 @@ fn main() {
                 width,
                 height,
                 black_box(Some(rect)),
+                OPAQUE,
                 previous,
                 &rounded,
             );
@@ -158,8 +160,31 @@ fn main() {
         })
         .report("30% rounded, drag frame");
 
+        let mut opacity = OPAQUE;
         measure(&mut canvas, |canvas| {
-            render::draw(canvas, width, height, black_box(None), Some(base), &square)
+            opacity = opacity.wrapping_sub(1);
+            render::draw(
+                canvas,
+                width,
+                height,
+                black_box(Some(base)),
+                opacity,
+                Some(base),
+                &rounded,
+            );
+        })
+        .report("30% rounded, fade frame");
+
+        measure(&mut canvas, |canvas| {
+            render::draw(
+                canvas,
+                width,
+                height,
+                black_box(None),
+                OPAQUE,
+                Some(base),
+                &square,
+            )
         })
         .report("clearing a released selection");
 

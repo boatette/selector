@@ -87,6 +87,13 @@ in
             description = "corner rounding in pixels, 0 is square corners, clamped to half the shorter side";
           };
 
+          fade_out = lib.mkOption {
+            type = lib.types.nullOr lib.types.ints.unsigned;
+            default = null;
+            example = 150;
+            description = "milliseconds the selection takes to fade out when a drag ends, 0 removes it at once";
+          };
+
           blur = lib.mkOption {
             type = lib.types.nullOr lib.types.bool;
             default = null;

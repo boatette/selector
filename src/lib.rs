@@ -1,5 +1,6 @@
 pub mod app;
 pub mod config;
+pub mod fade;
 pub mod geometry;
 pub mod monitor;
 pub mod render;

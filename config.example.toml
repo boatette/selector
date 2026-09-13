@@ -13,6 +13,9 @@ border_width = 1
 # clamped to half the shorter side, and the fill curve stays concentric with the border
 corner_radius = 0
 
+# how long a released selection takes to fade out, in milliseconds, 0 removes it at once
+fade_out = 150
+
 # ask the compositor to blur what is behind the selection
 # needs a compositor implementing ext-background-effect, and only shows through a translucent fill
 blur = false

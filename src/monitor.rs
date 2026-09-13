@@ -13,6 +13,7 @@ use wayland_client::{
 
 use crate::app::App;
 use crate::config::Config;
+use crate::fade::Look;
 use crate::geometry::{Point, Rect};
 use crate::render::{self, BYTES_PER_PIXEL};
 
@@ -28,7 +29,7 @@ struct Frame {
 pub struct Paint<'a> {
     pub config: &'a Config,
     pub compositor: &'a CompositorState,
-    pub selection: Option<Rect>,
+    pub look: Look,
 }
 
 pub struct Monitor {
@@ -43,6 +44,7 @@ pub struct Monitor {
     dirty: bool,
     frame_pending: bool,
     painted: Option<Rect>,
+    opacity: u8,
     blur: Option<BlurSurface>,
     blur_region: Option<Rect>,
     last_draw: Option<Instant>,
@@ -68,6 +70,7 @@ impl Monitor {
             dirty: false,
             frame_pending: false,
             painted: None,
+            opacity: 0,
             blur,
             blur_region: None,
             last_draw: None,
@@ -177,7 +180,7 @@ impl Monitor {
     }
 
     pub fn sync(&mut self, qh: &QueueHandle<App>, paint: &Paint) {
-        if self.painted == self.local_rect(paint.selection) {
+        if !self.needs_draw(paint) {
             return;
         }
 
@@ -189,9 +192,18 @@ impl Monitor {
 
     pub fn frame_done(&mut self, qh: &QueueHandle<App>, paint: &Paint) {
         self.frame_pending = false;
-        if self.dirty {
+        if self.dirty || self.needs_draw(paint) {
             self.draw(qh, paint);
         }
+    }
+
+    fn needs_draw(&self, paint: &Paint) -> bool {
+        let rect = self.local_rect(paint.look.rect);
+        if rect != self.painted {
+            return true;
+        }
+
+        rect.is_some() && (paint.look.leaving || paint.look.opacity != self.opacity)
     }
 
     pub fn draw(&mut self, qh: &QueueHandle<App>, paint: &Paint) {
@@ -204,7 +216,7 @@ impl Monitor {
         let timing = log::log_enabled!(log::Level::Debug).then(Instant::now);
 
         let (width, height) = (self.width, self.height);
-        let rect = self.local_rect(paint.selection);
+        let rect = self.local_rect(paint.look.rect);
 
         let Some(index) = self.free_frame() else {
             self.dirty = true;
@@ -226,7 +238,15 @@ impl Monitor {
             return;
         };
 
-        render::draw(canvas, width, height, rect, stale, paint.config);
+        render::draw(
+            canvas,
+            width,
+            height,
+            rect,
+            paint.look.opacity,
+            stale,
+            paint.config,
+        );
         frame.painted = rect;
 
         let surface = self.layer.wl_surface();
@@ -246,8 +266,10 @@ impl Monitor {
             return;
         }
 
-        self.set_blur_region(paint.compositor, rect, paint.config.corner_radius);
+        let blur = rect.filter(|_| !paint.look.leaving);
+        self.set_blur_region(paint.compositor, blur, paint.config.corner_radius);
         self.painted = rect;
+        self.opacity = paint.look.opacity;
 
         self.layer.commit();
 

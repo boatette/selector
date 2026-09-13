@@ -2,12 +2,14 @@ use crate::config::{Color, Config};
 use crate::geometry::Rect;
 
 pub const BYTES_PER_PIXEL: usize = 4;
+pub const OPAQUE: u8 = u8::MAX;
 
 pub fn draw(
     canvas: &mut [u8],
     canvas_width: u32,
     canvas_height: u32,
     rect: Option<Rect>,
+    opacity: u8,
     stale: Option<Rect>,
     config: &Config,
 ) {
@@ -16,7 +18,7 @@ pub fn draw(
         width: canvas_width,
         height: canvas_height,
     }
-    .draw(rect, stale, config);
+    .draw(rect, opacity, stale, config);
 }
 
 const BLANK: Color = Color::rgba(0, 0, 0, 0);
@@ -28,7 +30,7 @@ struct Canvas<'a> {
 }
 
 impl Canvas<'_> {
-    fn draw(&mut self, rect: Option<Rect>, stale: Option<Rect>, config: &Config) {
+    fn draw(&mut self, rect: Option<Rect>, opacity: u8, stale: Option<Rect>, config: &Config) {
         if let Some(stale) = stale {
             self.fill_rect(stale, BLANK);
         }
@@ -44,8 +46,11 @@ impl Canvas<'_> {
             .min(rect.width / 2)
             .min(rect.height / 2);
 
-        if inset > 0 && !config.border.is_transparent() {
-            self.fill_rounded_rect(rect, radius, config.border);
+        let fill = config.fill.faded(opacity);
+        let border = config.border.faded(opacity);
+
+        if inset > 0 && !border.is_transparent() {
+            self.fill_rounded_rect(rect, radius, border);
         }
 
         let interior = Rect::new(
@@ -56,7 +61,7 @@ impl Canvas<'_> {
         );
 
         if !interior.is_empty() {
-            self.fill_rounded_rect(interior, radius.saturating_sub(inset), config.fill);
+            self.fill_rounded_rect(interior, radius.saturating_sub(inset), fill);
         }
     }
 
@@ -204,7 +209,7 @@ mod tests {
     #[test]
     fn no_selection_clears_stale_pixels() {
         let mut c = canvas();
-        draw(&mut c, W, H, None, all(W, H), &config());
+        draw(&mut c, W, H, None, OPAQUE, all(W, H), &config());
         assert!(c.iter().all(|&b| b == 0));
     }
 
@@ -212,7 +217,15 @@ mod tests {
     fn selection_paints_border_outside_and_fill_inside() {
         let mut c = canvas();
         let cfg = config();
-        draw(&mut c, W, H, Some(Rect::new(2, 2, 4, 4)), all(W, H), &cfg);
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(2, 2, 4, 4)),
+            OPAQUE,
+            all(W, H),
+            &cfg,
+        );
 
         assert_eq!(pixel(&c, 2, 2), cfg.border.to_argb8888(), "top-left border");
         assert_eq!(
@@ -232,7 +245,15 @@ mod tests {
             border_width: 4,
             ..config()
         };
-        draw(&mut c, W, H, Some(Rect::new(1, 1, 2, 2)), all(W, H), &cfg);
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(1, 1, 2, 2)),
+            OPAQUE,
+            all(W, H),
+            &cfg,
+        );
 
         for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
             assert_eq!(pixel(&c, x, y), cfg.border.to_argb8888());
@@ -246,7 +267,15 @@ mod tests {
             border_width: 0,
             ..config()
         };
-        draw(&mut c, W, H, Some(Rect::new(2, 2, 4, 4)), all(W, H), &cfg);
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(2, 2, 4, 4)),
+            OPAQUE,
+            all(W, H),
+            &cfg,
+        );
 
         assert_eq!(pixel(&c, 2, 2), cfg.fill.to_argb8888());
         assert_eq!(pixel(&c, 5, 5), cfg.fill.to_argb8888());
@@ -277,11 +306,11 @@ mod tests {
         let selection = Some(Rect::new(0, 0, w, h));
 
         let mut c = sized_canvas(w, h);
-        draw(&mut c, w, h, selection, all(w, h), &square);
+        draw(&mut c, w, h, selection, OPAQUE, all(w, h), &square);
         assert_eq!(pixel_at(&c, w, 0, 0), square.fill.to_argb8888());
 
         let mut c = sized_canvas(w, h);
-        draw(&mut c, w, h, selection, all(w, h), &rounded);
+        draw(&mut c, w, h, selection, OPAQUE, all(w, h), &rounded);
         assert_eq!(pixel_at(&c, w, 0, 0), [0; 4], "the corner is cut away");
         assert_eq!(
             pixel_at(&c, w, 8, 0),
@@ -305,7 +334,15 @@ mod tests {
 
         let (w, h) = (24, 24);
         let mut c = sized_canvas(w, h);
-        draw(&mut c, w, h, Some(Rect::new(0, 0, w, h)), all(w, h), &cfg);
+        draw(
+            &mut c,
+            w,
+            h,
+            Some(Rect::new(0, 0, w, h)),
+            OPAQUE,
+            all(w, h),
+            &cfg,
+        );
 
         let border = cfg.border.to_argb8888();
         let fill = cfg.fill.to_argb8888();
@@ -326,7 +363,15 @@ mod tests {
         };
 
         let mut c = canvas();
-        draw(&mut c, W, H, Some(Rect::new(0, 0, W, H)), all(W, H), &cfg);
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(0, 0, W, H)),
+            OPAQUE,
+            all(W, H),
+            &cfg,
+        );
 
         assert_eq!(pixel(&c, 0, 0), [0; 4], "a circle has no corner");
         assert_eq!(pixel(&c, 4, 4), cfg.fill.to_argb8888(), "centre is filled");
@@ -341,7 +386,15 @@ mod tests {
         };
 
         let mut c = canvas();
-        draw(&mut c, W, H, Some(Rect::new(6, 0, 8, 4)), all(W, H), &cfg);
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(6, 0, 8, 4)),
+            OPAQUE,
+            all(W, H),
+            &cfg,
+        );
 
         assert_eq!(pixel(&c, 0, 1), [0; 4], "must not wrap onto the next row");
     }
@@ -355,7 +408,15 @@ mod tests {
         };
 
         let mut c = canvas();
-        draw(&mut c, W, H, Some(Rect::new(-4, 2, 8, 4)), all(W, H), &cfg);
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(-4, 2, 8, 4)),
+            OPAQUE,
+            all(W, H),
+            &cfg,
+        );
 
         assert_eq!(
             pixel(&c, 0, 3),
@@ -377,7 +438,15 @@ mod tests {
             border_width: 0,
             ..config()
         };
-        draw(&mut c, W, H, Some(Rect::new(6, 0, 8, 1)), all(W, H), &cfg);
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(6, 0, 8, 1)),
+            OPAQUE,
+            all(W, H),
+            &cfg,
+        );
 
         assert_eq!(pixel(&c, 7, 0), cfg.fill.to_argb8888());
         assert_eq!(pixel(&c, 0, 1), [0; 4], "must not wrap onto the next row");
@@ -392,10 +461,10 @@ mod tests {
         let mut c = canvas();
 
         let first = Rect::new(1, 1, 3, 3);
-        draw(&mut c, W, H, Some(first), all(W, H), &cfg);
+        draw(&mut c, W, H, Some(first), OPAQUE, all(W, H), &cfg);
 
         let second = Rect::new(4, 4, 3, 3);
-        draw(&mut c, W, H, Some(second), Some(first), &cfg);
+        draw(&mut c, W, H, Some(second), OPAQUE, Some(first), &cfg);
 
         assert_eq!(pixel(&c, 2, 2), [0; 4], "the old selection is gone");
         assert_eq!(
@@ -414,10 +483,10 @@ mod tests {
         let mut c = canvas();
 
         let first = Rect::new(1, 1, 4, 4);
-        draw(&mut c, W, H, Some(first), all(W, H), &cfg);
+        draw(&mut c, W, H, Some(first), OPAQUE, all(W, H), &cfg);
 
         let second = Rect::new(2, 2, 4, 4);
-        draw(&mut c, W, H, Some(second), Some(first), &cfg);
+        draw(&mut c, W, H, Some(second), OPAQUE, Some(first), &cfg);
 
         for (x, y) in [(2, 2), (3, 3), (5, 5)] {
             assert_eq!(pixel(&c, x, y), cfg.fill.to_argb8888(), "({x}, {y})");
@@ -432,9 +501,51 @@ mod tests {
             ..config()
         };
         let mut c = canvas();
-        draw(&mut c, W, H, Some(Rect::new(2, 2, 2, 2)), None, &cfg);
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(2, 2, 2, 2)),
+            OPAQUE,
+            None,
+            &cfg,
+        );
 
         assert_eq!(pixel(&c, 2, 2), cfg.fill.to_argb8888());
         assert_eq!(pixel(&c, 0, 0), [0xAB; 4], "nothing else was erased");
+    }
+
+    #[test]
+    fn opacity_scales_the_alpha_of_both_colours() {
+        let cfg = config();
+        let mut c = canvas();
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(2, 2, 4, 4)),
+            0x80,
+            all(W, H),
+            &cfg,
+        );
+
+        assert_eq!(pixel(&c, 2, 2), cfg.border.faded(0x80).to_argb8888());
+        assert_eq!(pixel(&c, 3, 3), cfg.fill.faded(0x80).to_argb8888());
+        assert_eq!(pixel(&c, 3, 3)[3], 0x80, "an opaque fill at half opacity");
+    }
+
+    #[test]
+    fn zero_opacity_leaves_only_cleared_pixels() {
+        let mut c = canvas();
+        draw(
+            &mut c,
+            W,
+            H,
+            Some(Rect::new(2, 2, 4, 4)),
+            0,
+            all(W, H),
+            &config(),
+        );
+        assert!(c.iter().all(|&b| b == 0));
     }
 }

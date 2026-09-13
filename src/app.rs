@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
@@ -27,6 +29,7 @@ use wayland_client::{
 };
 
 use crate::config::Config;
+use crate::fade::Fade;
 use crate::geometry::Rect;
 use crate::monitor::{Monitor, Paint};
 use crate::render::BYTES_PER_PIXEL;
@@ -46,6 +49,7 @@ pub struct App {
     config: Config,
     blur: bool,
     selection: Selection,
+    fade: Fade,
     monitors: Vec<Monitor>,
     pointer: Option<wl_pointer::WlPointer>,
 }
@@ -75,6 +79,7 @@ impl App {
             layer_shell,
             background_effect,
             selection: Selection::new(config.drag_threshold),
+            fade: Fade::new(Duration::from_millis(config.fade_out)),
             config,
             blur,
             monitors: Vec::new(),
@@ -157,7 +162,7 @@ impl App {
             monitors,
             config,
             compositor,
-            selection,
+            fade,
             ..
         } = self;
 
@@ -166,12 +171,14 @@ impl App {
             Paint {
                 config,
                 compositor,
-                selection: selection.rect(),
+                look: fade.look(Instant::now()),
             },
         )
     }
 
     fn sync_selection(&mut self, qh: &QueueHandle<Self>) {
+        self.fade.track(self.selection.rect(), Instant::now());
+
         let (monitors, paint) = self.monitors_and_paint();
 
         for monitor in monitors {

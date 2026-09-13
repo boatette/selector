@@ -34,6 +34,7 @@ selector reads `$XDG_CONFIG_HOME/selector/config.toml`, falling back to `~/.conf
 | `drag_threshold` | `3.0`         | pixels the pointer must travel before a press counts as a drag |
 | `border_width`   | `1`           | outline thickness in pixels, `0` disables the outline          |
 | `corner_radius`  | `0`           | corner rounding in pixels, clamped to half the shorter side    |
+| `fade_out`       | `150`         | milliseconds to fade out a released selection, `0` is instant  |
 | `blur`           | `false`       | ask the compositor to blur behind the selection                |
 | `fill`           | `"#4c9ed940"` | interior colour, `#rrggbb` or `#rrggbbaa`                      |
 | `border`         | `"#4c9ed9cc"` | outline colour, `#rrggbb` or `#rrggbbaa`                       |
@@ -45,7 +46,7 @@ Also see [`config.example.toml`](config.example.toml)
 
 ### Blur
 
-A Wayland client cannot see what is behind it, so blur is something selector asks for rather than draws. It names the selection as a region to blur through [ext-background-effect-v1](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/tree/main/staging/ext-background-effect), and the compositor blurs what it paints underneath. The blur shows through wherever `fill` is translucent, so the alpha in `fill` is what tunes it and an opaque `fill` hides it entirely. On a compositor without the protocol, `blur = true` logs a warning at startup and changes nothing else.
+A Wayland client cannot see what is behind it, so blur is something selector asks for rather than draws. It names the selection as a region to blur through [ext-background-effect-v1](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/tree/main/staging/ext-background-effect), and the compositor blurs what it paints underneath. The blur shows through wherever `fill` is translucent, so the alpha in `fill` is what tunes it and an opaque `fill` hides it entirely. On a compositor without the protocol, `blur = true` logs a warning at startup and changes nothing else. Blur has no strength to fade, so it goes the moment a selection is released and only the colours fade out.
 
 niri implements it, but also wants a rule allowing the effect for our layer surface:
 
