@@ -31,6 +31,7 @@ use wayland_client::{
 use crate::config::Config;
 use crate::fade::Fade;
 use crate::geometry::Rect;
+use crate::idle::Idle;
 use crate::monitor::{Monitor, Paint};
 use crate::selection::{BTN_LEFT, Selection};
 
@@ -44,6 +45,7 @@ pub struct App {
     compositor: CompositorState,
     layer_shell: LayerShell,
     background_effect: BackgroundEffectState,
+    idle: Option<Idle>,
 
     config: Config,
     blur: bool,
@@ -69,6 +71,13 @@ impl App {
             );
         }
 
+        let idle = Idle::bind(globals, qh, &shm);
+        if idle.is_some() {
+            log::debug!("releasing buffers while nothing is selected");
+        } else {
+            log::info!("compositor lacks wp_viewporter, keeping buffers while nothing is selected");
+        }
+
         Ok(Self {
             registry_state: RegistryState::new(globals),
             seat_state: SeatState::new(globals, qh),
@@ -77,6 +86,7 @@ impl App {
             compositor,
             layer_shell,
             background_effect,
+            idle,
             selection: Selection::new(config.drag_threshold),
             fade: Fade::new(Duration::from_millis(config.fade_out)),
             config,
@@ -128,10 +138,15 @@ impl App {
             }
         };
 
+        let viewport = self
+            .idle
+            .as_ref()
+            .map(|idle| idle.viewport(layer.wl_surface(), qh));
+
         let origin = self.output_origin(&output);
         log::info!("tracking output {name} at ({}, {})", origin.0, origin.1);
         self.monitors
-            .push(Monitor::new(output, layer, origin, blur));
+            .push(Monitor::new(output, layer, origin, blur, viewport));
     }
 
     fn output_origin(&self, output: &wl_output::WlOutput) -> (i32, i32) {
@@ -154,6 +169,7 @@ impl App {
             config,
             compositor,
             shm,
+            idle,
             fade,
             ..
         } = self;
@@ -164,6 +180,7 @@ impl App {
                 config,
                 compositor,
                 shm,
+                idle: idle.as_ref(),
                 look: fade.look(Instant::now()),
             },
         )

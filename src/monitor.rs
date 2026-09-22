@@ -2,7 +2,10 @@ use std::time::Instant;
 
 use smithay_client_toolkit::{
     compositor::{CompositorState, FrameCallbackData, Region},
-    reexports::protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1,
+    reexports::protocols::{
+        ext::background_effect::v1::client::ext_background_effect_surface_v1,
+        wp::viewporter::client::wp_viewport::WpViewport,
+    },
     shell::{WaylandSurface, wlr_layer::LayerSurface},
     shm::{
         Shm,
@@ -18,6 +21,7 @@ use crate::app::App;
 use crate::config::Config;
 use crate::fade::Look;
 use crate::geometry::{Point, Rect};
+use crate::idle::Idle;
 use crate::render::{self, BYTES_PER_PIXEL, Painted};
 
 type BlurSurface = ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
@@ -33,6 +37,7 @@ pub struct Paint<'a> {
     pub config: &'a Config,
     pub compositor: &'a CompositorState,
     pub shm: &'a Shm,
+    pub idle: Option<&'a Idle>,
     pub look: Look,
 }
 
@@ -50,6 +55,7 @@ pub struct Monitor {
     painted: Option<Painted>,
     blur: Option<BlurSurface>,
     blur_region: Option<Rect>,
+    viewport: Option<WpViewport>,
     last_draw: Option<Instant>,
 }
 
@@ -59,6 +65,7 @@ impl Monitor {
         layer: LayerSurface,
         origin: (i32, i32),
         blur: Option<BlurSurface>,
+        viewport: Option<WpViewport>,
     ) -> Self {
         Self {
             output,
@@ -74,6 +81,7 @@ impl Monitor {
             painted: None,
             blur,
             blur_region: None,
+            viewport,
             last_draw: None,
         }
     }
@@ -108,6 +116,10 @@ impl Monitor {
         if (self.width, self.height) != (width, height) {
             self.release_frames();
             self.painted = None;
+
+            if let Some(viewport) = &self.viewport {
+                viewport.set_destination(width as i32, height as i32);
+            }
         }
 
         self.width = width;
@@ -230,6 +242,14 @@ impl Monitor {
         let (width, height) = (self.width, self.height);
         let now = self.wanted(&paint.look);
 
+        if now.is_none()
+            && self.viewport.is_some()
+            && let Some(idle) = paint.idle
+        {
+            self.go_idle(idle, paint);
+            return;
+        }
+
         let Some(index) = self.free_frame(paint.shm) else {
             self.dirty = true;
             if !self.frame_pending {
@@ -260,20 +280,9 @@ impl Monitor {
         render::draw(canvas, width, height, now, &stale, paint.config);
         frame.painted = now;
 
+        self.damage(now, paint.config);
+
         let surface = self.layer.wl_surface();
-
-        if self.painted.is_none() && now.is_none() {
-            surface.damage_buffer(0, 0, width as i32, height as i32);
-        } else {
-            for area in render::changes(self.painted, now, paint.config, width, height) {
-                if area.is_empty() {
-                    continue;
-                }
-                let area = area.grow(1).clamp_to_surface(width, height);
-                surface.damage_buffer(area.x, area.y, area.width as i32, area.height as i32);
-            }
-        }
-
         surface.frame(qh, FrameCallbackData(surface.clone()));
         self.frame_pending = true;
 
@@ -290,6 +299,41 @@ impl Monitor {
 
         if let Some(started) = timing {
             self.log_frame(started);
+        }
+    }
+
+    // Swaps in a single transparent pixel stretched over the output, so the surface still takes
+    // pointer input everywhere but the full-size frames can be handed back until the next drag.
+    fn go_idle(&mut self, idle: &Idle, paint: &Paint) {
+        self.damage(None, paint.config);
+        self.layer.wl_surface().attach(Some(idle.buffer()), 0, 0);
+        self.set_blur_region(paint.compositor, None, paint.config.corner_radius);
+        self.painted = None;
+
+        // no frame callback, so the next drag can draw at once
+        self.frame_pending = false;
+        self.layer.commit();
+
+        self.release_frames();
+    }
+
+    // Damage goes in surface coordinates. They match a frame's buffer pixel for pixel, but the
+    // idle pixel is 1x1 and buffer coordinates could not name the area it clears.
+    fn damage(&self, now: Option<Painted>, config: &Config) {
+        let (width, height) = (self.width, self.height);
+        let surface = self.layer.wl_surface();
+
+        if self.painted.is_none() && now.is_none() {
+            surface.damage(0, 0, width as i32, height as i32);
+            return;
+        }
+
+        for area in render::changes(self.painted, now, config, width, height) {
+            if area.is_empty() {
+                continue;
+            }
+            let area = area.grow(1).clamp_to_surface(width, height);
+            surface.damage(area.x, area.y, area.width as i32, area.height as i32);
         }
     }
 
@@ -345,6 +389,9 @@ impl Drop for Monitor {
     fn drop(&mut self) {
         if let Some(effect) = &self.blur {
             effect.destroy();
+        }
+        if let Some(viewport) = &self.viewport {
+            viewport.destroy();
         }
     }
 }
