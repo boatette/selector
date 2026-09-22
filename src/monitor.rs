@@ -4,7 +4,10 @@ use smithay_client_toolkit::{
     compositor::{CompositorState, FrameCallbackData, Region},
     reexports::protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1,
     shell::{WaylandSurface, wlr_layer::LayerSurface},
-    shm::slot::{Buffer, SlotPool},
+    shm::{
+        Shm,
+        slot::{Buffer, SlotPool},
+    },
 };
 use wayland_client::{
     QueueHandle,
@@ -15,7 +18,7 @@ use crate::app::App;
 use crate::config::Config;
 use crate::fade::Look;
 use crate::geometry::{Point, Rect};
-use crate::render::{self, BYTES_PER_PIXEL};
+use crate::render::{self, BYTES_PER_PIXEL, Painted};
 
 type BlurSurface = ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
 
@@ -23,19 +26,20 @@ const FRAMES: usize = 2;
 
 struct Frame {
     buffer: Buffer,
-    painted: Option<Rect>,
+    painted: Option<Painted>,
 }
 
 pub struct Paint<'a> {
     pub config: &'a Config,
     pub compositor: &'a CompositorState,
+    pub shm: &'a Shm,
     pub look: Look,
 }
 
 pub struct Monitor {
     output: wl_output::WlOutput,
     layer: LayerSurface,
-    pool: SlotPool,
+    pool: Option<SlotPool>,
     frames: Vec<Frame>,
     origin: (i32, i32),
     width: u32,
@@ -43,8 +47,7 @@ pub struct Monitor {
     configured: bool,
     dirty: bool,
     frame_pending: bool,
-    painted: Option<Rect>,
-    opacity: u8,
+    painted: Option<Painted>,
     blur: Option<BlurSurface>,
     blur_region: Option<Rect>,
     last_draw: Option<Instant>,
@@ -54,14 +57,13 @@ impl Monitor {
     pub const fn new(
         output: wl_output::WlOutput,
         layer: LayerSurface,
-        pool: SlotPool,
         origin: (i32, i32),
         blur: Option<BlurSurface>,
     ) -> Self {
         Self {
             output,
             layer,
-            pool,
+            pool: None,
             frames: Vec::new(),
             origin,
             width: 0,
@@ -70,7 +72,6 @@ impl Monitor {
             dirty: false,
             frame_pending: false,
             painted: None,
-            opacity: 0,
             blur,
             blur_region: None,
             last_draw: None,
@@ -104,62 +105,70 @@ impl Monitor {
     }
 
     pub fn configure(&mut self, width: u32, height: u32) {
-        let resized = (self.width, self.height) != (width, height);
+        if (self.width, self.height) != (width, height) {
+            self.release_frames();
+            self.painted = None;
+        }
 
         self.width = width;
         self.height = height;
         self.configured = true;
         self.frame_pending = false;
+    }
 
-        if resized || self.frames.is_empty() {
-            self.build_frames();
+    fn release_frames(&mut self) {
+        self.frames.clear();
+        self.pool = None;
+    }
+
+    fn free_frame(&mut self, shm: &Shm) -> Option<usize> {
+        let Self { pool, frames, .. } = self;
+        if let Some(pool) = pool
+            && let Some(index) =
+                (0..frames.len()).find(|&i| pool.canvas(&frames[i].buffer).is_some())
+        {
+            return Some(index);
+        }
+
+        if frames.len() < FRAMES {
+            self.new_frame(shm)
+        } else {
+            None
         }
     }
 
-    fn build_frames(&mut self) {
-        self.frames.clear();
-        self.painted = None;
-
-        let (width, height) = (self.width, self.height);
-        let stride = width as i32 * BYTES_PER_PIXEL as i32;
+    // A fresh memfd reads as zeroes, which is transparent, so a new frame starts out blank.
+    // Pools are dropped whole rather than reused, which keeps that true.
+    fn new_frame(&mut self, shm: &Shm) -> Option<usize> {
+        let (width, height) = (self.width as i32, self.height as i32);
+        let stride = width * BYTES_PER_PIXEL as i32;
         let len = height as usize * stride as usize;
 
-        if let Err(err) = self.pool.resize(len * FRAMES) {
-            log::error!("failed to size the shm pool: {err}");
-            return;
-        }
-
-        for _ in 0..FRAMES {
-            let slot = match self.pool.new_slot(len) {
-                Ok(slot) => slot,
+        let pool = match &mut self.pool {
+            Some(pool) => pool,
+            // slots are 64-byte aligned, round up so the first frame fits without a resize
+            None => match SlotPool::new(len.next_multiple_of(64), shm) {
+                Ok(pool) => self.pool.insert(pool),
                 Err(err) => {
-                    log::error!("failed to allocate a buffer slot: {err}");
-                    return;
+                    log::error!("failed to create an shm pool: {err}");
+                    return None;
                 }
-            };
+            },
+        };
 
-            match self.pool.create_buffer_in(
-                &slot,
-                width as i32,
-                height as i32,
-                stride,
-                wl_shm::Format::Argb8888,
-            ) {
-                Ok(buffer) => self.frames.push(Frame {
-                    painted: Some(Rect::new(0, 0, width, height)),
+        match pool.create_buffer(width, height, stride, wl_shm::Format::Argb8888) {
+            Ok((buffer, _)) => {
+                self.frames.push(Frame {
                     buffer,
-                }),
-                Err(err) => {
-                    log::error!("failed to create a buffer: {err}");
-                    return;
-                }
+                    painted: None,
+                });
+                Some(self.frames.len() - 1)
+            }
+            Err(err) => {
+                log::error!("failed to create a buffer: {err}");
+                None
             }
         }
-    }
-
-    fn free_frame(&mut self) -> Option<usize> {
-        let Self { pool, frames, .. } = self;
-        (0..frames.len()).find(|&i| pool.canvas(&frames[i].buffer).is_some())
     }
 
     pub fn local_rect(&self, selection: Option<Rect>) -> Option<Rect> {
@@ -197,13 +206,16 @@ impl Monitor {
         }
     }
 
-    fn needs_draw(&self, paint: &Paint) -> bool {
-        let rect = self.local_rect(paint.look.rect);
-        if rect != self.painted {
-            return true;
-        }
+    fn wanted(&self, look: &Look) -> Option<Painted> {
+        self.local_rect(look.rect).map(|rect| Painted {
+            rect,
+            opacity: look.opacity,
+        })
+    }
 
-        rect.is_some() && (paint.look.leaving || paint.look.opacity != self.opacity)
+    fn needs_draw(&self, paint: &Paint) -> bool {
+        let wanted = self.wanted(&paint.look);
+        wanted != self.painted || (wanted.is_some() && paint.look.leaving)
     }
 
     pub fn draw(&mut self, qh: &QueueHandle<App>, paint: &Paint) {
@@ -216,9 +228,9 @@ impl Monitor {
         let timing = log::log_enabled!(log::Level::Debug).then(Instant::now);
 
         let (width, height) = (self.width, self.height);
-        let rect = self.local_rect(paint.look.rect);
+        let now = self.wanted(&paint.look);
 
-        let Some(index) = self.free_frame() else {
+        let Some(index) = self.free_frame(paint.shm) else {
             self.dirty = true;
             if !self.frame_pending {
                 let surface = self.layer.wl_surface();
@@ -229,33 +241,37 @@ impl Monitor {
             return;
         };
 
-        let Self { pool, frames, .. } = self;
+        let Self {
+            pool: Some(pool),
+            frames,
+            ..
+        } = self
+        else {
+            return;
+        };
         let frame = &mut frames[index];
-        let stale = frame.painted;
 
         let Some(canvas) = pool.canvas(&frame.buffer) else {
             log::error!("buffer {index} became busy while drawing");
             return;
         };
 
-        render::draw(
-            canvas,
-            width,
-            height,
-            rect,
-            paint.look.opacity,
-            stale,
-            paint.config,
-        );
-        frame.painted = rect;
+        let stale = render::changes(frame.painted, now, paint.config, width, height);
+        render::draw(canvas, width, height, now, &stale, paint.config);
+        frame.painted = now;
 
         let surface = self.layer.wl_surface();
 
-        match damage(self.painted, rect, width, height) {
-            Some(area) => {
-                surface.damage_buffer(area.x, area.y, area.width as i32, area.height as i32)
+        if self.painted.is_none() && now.is_none() {
+            surface.damage_buffer(0, 0, width as i32, height as i32);
+        } else {
+            for area in render::changes(self.painted, now, paint.config, width, height) {
+                if area.is_empty() {
+                    continue;
+                }
+                let area = area.grow(1).clamp_to_surface(width, height);
+                surface.damage_buffer(area.x, area.y, area.width as i32, area.height as i32);
             }
-            None => surface.damage_buffer(0, 0, width as i32, height as i32),
         }
 
         surface.frame(qh, FrameCallbackData(surface.clone()));
@@ -266,10 +282,9 @@ impl Monitor {
             return;
         }
 
-        let blur = rect.filter(|_| !paint.look.leaving);
+        let blur = now.map(|now| now.rect).filter(|_| !paint.look.leaving);
         self.set_blur_region(paint.compositor, blur, paint.config.corner_radius);
-        self.painted = rect;
-        self.opacity = paint.look.opacity;
+        self.painted = now;
 
         self.layer.commit();
 
@@ -324,16 +339,6 @@ impl Monitor {
 
         self.blur_region = wanted;
     }
-}
-
-fn damage(was: Option<Rect>, now: Option<Rect>, width: u32, height: u32) -> Option<Rect> {
-    let area = match (was, now) {
-        (Some(was), Some(now)) => was.union(now),
-        (Some(only), None) | (None, Some(only)) => only,
-        (None, None) => return None,
-    };
-
-    Some(area.grow(1).clamp_to_surface(width, height))
 }
 
 impl Drop for Monitor {

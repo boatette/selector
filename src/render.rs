@@ -4,50 +4,96 @@ use crate::geometry::Rect;
 pub const BYTES_PER_PIXEL: usize = 4;
 pub const OPAQUE: u8 = u8::MAX;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Painted {
+    pub rect: Rect,
+    pub opacity: u8,
+}
+
 pub fn draw(
     canvas: &mut [u8],
     canvas_width: u32,
     canvas_height: u32,
-    rect: Option<Rect>,
-    opacity: u8,
-    stale: Option<Rect>,
+    selection: Option<Painted>,
+    regions: &[Rect],
     config: &Config,
 ) {
-    Canvas {
+    let mut canvas = Canvas {
         pixels: canvas,
         width: canvas_width,
-        height: canvas_height,
+        clip: NONE,
+    };
+
+    for region in regions {
+        let region = region.clamp_to_surface(canvas_width, canvas_height);
+        if region.is_empty() {
+            continue;
+        }
+
+        canvas.clip = region;
+        canvas.fill_rect(region, BLANK);
+        if let Some(selection) = selection {
+            canvas.draw(selection, config);
+        }
     }
-    .draw(rect, opacity, stale, config);
+}
+
+pub fn changes(
+    was: Option<Painted>,
+    now: Option<Painted>,
+    config: &Config,
+    width: u32,
+    height: u32,
+) -> [Rect; 4] {
+    let area = match (was, now) {
+        (None, None) => return [NONE; 4],
+        (Some(was), Some(now)) if was == now => return [NONE; 4],
+        (Some(only), None) | (None, Some(only)) => [only.rect, NONE, NONE, NONE],
+        (Some(was), Some(now)) if was.opacity != now.opacity => {
+            [was.rect.union(now.rect), NONE, NONE, NONE]
+        }
+        (Some(was), Some(now)) => {
+            let unchanged = core(was.rect, config).intersect(core(now.rect, config));
+            was.rect.union(now.rect).minus(unchanged)
+        }
+    };
+
+    area.map(|rect| rect.clamp_to_surface(width, height))
+}
+
+fn outline(rect: Rect, config: &Config) -> (u32, u32) {
+    let limit = rect.width.min(rect.height) / 2;
+    (
+        config.border_width.min(limit),
+        config.corner_radius.min(limit),
+    )
+}
+
+fn core(rect: Rect, config: &Config) -> Rect {
+    let (inset, radius) = outline(rect, config);
+    rect.inset(inset.max(radius))
 }
 
 const BLANK: Color = Color::rgba(0, 0, 0, 0);
+const NONE: Rect = Rect::new(0, 0, 0, 0);
 
 struct Canvas<'a> {
     pixels: &'a mut [u8],
     width: u32,
-    height: u32,
+    clip: Rect,
 }
 
 impl Canvas<'_> {
-    fn draw(&mut self, rect: Option<Rect>, opacity: u8, stale: Option<Rect>, config: &Config) {
-        if let Some(stale) = stale {
-            self.fill_rect(stale, BLANK);
-        }
-
-        let Some(rect) = rect else { return };
-        if !rect.overlaps_surface(self.width, self.height) {
+    fn draw(&mut self, selection: Painted, config: &Config) {
+        let rect = selection.rect;
+        if rect.intersect(self.clip).is_empty() {
             return;
         }
 
-        let inset = config.border_width.min(rect.width / 2).min(rect.height / 2);
-        let radius = config
-            .corner_radius
-            .min(rect.width / 2)
-            .min(rect.height / 2);
+        let (inset, radius) = outline(rect, config);
 
-        let fill = config.fill.faded(opacity);
-        let border = config.border.faded(opacity);
+        let fill = config.fill.faded(selection.opacity);
+        let border = config.border.faded(selection.opacity);
 
         if inset > 0 && !border.is_transparent() {
             self.fill_rounded_rect(rect, radius, border);
@@ -66,6 +112,10 @@ impl Canvas<'_> {
     }
 
     fn fill_rounded_rect(&mut self, rect: Rect, radius: u32, color: Color) {
+        if rect.intersect(self.clip).is_empty() {
+            return;
+        }
+
         let radius = radius.min(rect.width / 2).min(rect.height / 2);
         if radius == 0 {
             self.fill_rect(rect, color);
@@ -90,6 +140,10 @@ impl Canvas<'_> {
                 self.fill_rect(Rect::new(rect.x + edge, y, span_width, 1), color);
             }
 
+            if !self.clips_row(top) && !self.clips_row(bottom) {
+                continue;
+            }
+
             let dy = extent - (row as f64 + 0.5);
             for col in 0..radius {
                 let dx = extent - (col as f64 + 0.5);
@@ -108,7 +162,7 @@ impl Canvas<'_> {
     }
 
     fn fill_rect(&mut self, rect: Rect, color: Color) {
-        let rect = rect.clamp_to_surface(self.width, self.height);
+        let rect = rect.intersect(self.clip);
         if rect.is_empty() {
             return;
         }
@@ -137,8 +191,12 @@ impl Canvas<'_> {
         }
     }
 
+    fn clips_row(&self, y: i32) -> bool {
+        y >= self.clip.y && y < self.clip.bottom()
+    }
+
     fn blend_pixel(&mut self, x: i32, y: i32, pixel: [u8; 4], coverage: u8) {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+        if !self.clips_row(y) || x < self.clip.x || x >= self.clip.right() {
             return;
         }
 
@@ -188,8 +246,15 @@ mod tests {
         vec![0xAB; (W * H) as usize * BYTES_PER_PIXEL]
     }
 
-    fn all(w: u32, h: u32) -> Option<Rect> {
-        Some(Rect::new(0, 0, w, h))
+    fn all(w: u32, h: u32) -> [Rect; 1] {
+        [Rect::new(0, 0, w, h)]
+    }
+
+    fn shown(rect: Rect) -> Option<Painted> {
+        Some(Painted {
+            rect,
+            opacity: OPAQUE,
+        })
     }
 
     fn pixel(canvas: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -207,9 +272,9 @@ mod tests {
     }
 
     #[test]
-    fn no_selection_clears_stale_pixels() {
+    fn no_selection_clears_the_regions() {
         let mut c = canvas();
-        draw(&mut c, W, H, None, OPAQUE, all(W, H), &config());
+        draw(&mut c, W, H, None, &all(W, H), &config());
         assert!(c.iter().all(|&b| b == 0));
     }
 
@@ -217,15 +282,7 @@ mod tests {
     fn selection_paints_border_outside_and_fill_inside() {
         let mut c = canvas();
         let cfg = config();
-        draw(
-            &mut c,
-            W,
-            H,
-            Some(Rect::new(2, 2, 4, 4)),
-            OPAQUE,
-            all(W, H),
-            &cfg,
-        );
+        draw(&mut c, W, H, shown(Rect::new(2, 2, 4, 4)), &all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 2, 2), cfg.border.to_argb8888(), "top-left border");
         assert_eq!(
@@ -245,15 +302,7 @@ mod tests {
             border_width: 4,
             ..config()
         };
-        draw(
-            &mut c,
-            W,
-            H,
-            Some(Rect::new(1, 1, 2, 2)),
-            OPAQUE,
-            all(W, H),
-            &cfg,
-        );
+        draw(&mut c, W, H, shown(Rect::new(1, 1, 2, 2)), &all(W, H), &cfg);
 
         for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
             assert_eq!(pixel(&c, x, y), cfg.border.to_argb8888());
@@ -267,15 +316,7 @@ mod tests {
             border_width: 0,
             ..config()
         };
-        draw(
-            &mut c,
-            W,
-            H,
-            Some(Rect::new(2, 2, 4, 4)),
-            OPAQUE,
-            all(W, H),
-            &cfg,
-        );
+        draw(&mut c, W, H, shown(Rect::new(2, 2, 4, 4)), &all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 2, 2), cfg.fill.to_argb8888());
         assert_eq!(pixel(&c, 5, 5), cfg.fill.to_argb8888());
@@ -303,14 +344,14 @@ mod tests {
         };
 
         let (w, h) = (16, 16);
-        let selection = Some(Rect::new(0, 0, w, h));
+        let selection = shown(Rect::new(0, 0, w, h));
 
         let mut c = sized_canvas(w, h);
-        draw(&mut c, w, h, selection, OPAQUE, all(w, h), &square);
+        draw(&mut c, w, h, selection, &all(w, h), &square);
         assert_eq!(pixel_at(&c, w, 0, 0), square.fill.to_argb8888());
 
         let mut c = sized_canvas(w, h);
-        draw(&mut c, w, h, selection, OPAQUE, all(w, h), &rounded);
+        draw(&mut c, w, h, selection, &all(w, h), &rounded);
         assert_eq!(pixel_at(&c, w, 0, 0), [0; 4], "the corner is cut away");
         assert_eq!(
             pixel_at(&c, w, 8, 0),
@@ -334,15 +375,7 @@ mod tests {
 
         let (w, h) = (24, 24);
         let mut c = sized_canvas(w, h);
-        draw(
-            &mut c,
-            w,
-            h,
-            Some(Rect::new(0, 0, w, h)),
-            OPAQUE,
-            all(w, h),
-            &cfg,
-        );
+        draw(&mut c, w, h, shown(Rect::new(0, 0, w, h)), &all(w, h), &cfg);
 
         let border = cfg.border.to_argb8888();
         let fill = cfg.fill.to_argb8888();
@@ -363,15 +396,7 @@ mod tests {
         };
 
         let mut c = canvas();
-        draw(
-            &mut c,
-            W,
-            H,
-            Some(Rect::new(0, 0, W, H)),
-            OPAQUE,
-            all(W, H),
-            &cfg,
-        );
+        draw(&mut c, W, H, shown(Rect::new(0, 0, W, H)), &all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 0, 0), [0; 4], "a circle has no corner");
         assert_eq!(pixel(&c, 4, 4), cfg.fill.to_argb8888(), "centre is filled");
@@ -386,15 +411,7 @@ mod tests {
         };
 
         let mut c = canvas();
-        draw(
-            &mut c,
-            W,
-            H,
-            Some(Rect::new(6, 0, 8, 4)),
-            OPAQUE,
-            all(W, H),
-            &cfg,
-        );
+        draw(&mut c, W, H, shown(Rect::new(6, 0, 8, 4)), &all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 0, 1), [0; 4], "must not wrap onto the next row");
     }
@@ -412,9 +429,8 @@ mod tests {
             &mut c,
             W,
             H,
-            Some(Rect::new(-4, 2, 8, 4)),
-            OPAQUE,
-            all(W, H),
+            shown(Rect::new(-4, 2, 8, 4)),
+            &all(W, H),
             &cfg,
         );
 
@@ -438,33 +454,32 @@ mod tests {
             border_width: 0,
             ..config()
         };
-        draw(
-            &mut c,
-            W,
-            H,
-            Some(Rect::new(6, 0, 8, 1)),
-            OPAQUE,
-            all(W, H),
-            &cfg,
-        );
+        draw(&mut c, W, H, shown(Rect::new(6, 0, 8, 1)), &all(W, H), &cfg);
 
         assert_eq!(pixel(&c, 7, 0), cfg.fill.to_argb8888());
         assert_eq!(pixel(&c, 0, 1), [0; 4], "must not wrap onto the next row");
     }
 
     #[test]
-    fn erasing_the_stale_region_leaves_nothing_of_the_previous_frame() {
+    fn repainting_the_changes_leaves_nothing_of_the_previous_frame() {
         let cfg = Config {
             border_width: 0,
             ..config()
         };
         let mut c = canvas();
 
-        let first = Rect::new(1, 1, 3, 3);
-        draw(&mut c, W, H, Some(first), OPAQUE, all(W, H), &cfg);
+        let first = shown(Rect::new(1, 1, 3, 3));
+        draw(&mut c, W, H, first, &all(W, H), &cfg);
 
-        let second = Rect::new(4, 4, 3, 3);
-        draw(&mut c, W, H, Some(second), OPAQUE, Some(first), &cfg);
+        let second = shown(Rect::new(4, 4, 3, 3));
+        draw(
+            &mut c,
+            W,
+            H,
+            second,
+            &changes(first, second, &cfg, W, H),
+            &cfg,
+        );
 
         assert_eq!(pixel(&c, 2, 2), [0; 4], "the old selection is gone");
         assert_eq!(
@@ -482,11 +497,18 @@ mod tests {
         };
         let mut c = canvas();
 
-        let first = Rect::new(1, 1, 4, 4);
-        draw(&mut c, W, H, Some(first), OPAQUE, all(W, H), &cfg);
+        let first = shown(Rect::new(1, 1, 4, 4));
+        draw(&mut c, W, H, first, &all(W, H), &cfg);
 
-        let second = Rect::new(2, 2, 4, 4);
-        draw(&mut c, W, H, Some(second), OPAQUE, Some(first), &cfg);
+        let second = shown(Rect::new(2, 2, 4, 4));
+        draw(
+            &mut c,
+            W,
+            H,
+            second,
+            &changes(first, second, &cfg, W, H),
+            &cfg,
+        );
 
         for (x, y) in [(2, 2), (3, 3), (5, 5)] {
             assert_eq!(pixel(&c, x, y), cfg.fill.to_argb8888(), "({x}, {y})");
@@ -495,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn no_stale_region_leaves_the_canvas_untouched_outside_the_selection() {
+    fn pixels_outside_the_regions_are_left_alone() {
         let cfg = Config {
             border_width: 0,
             ..config()
@@ -505,14 +527,19 @@ mod tests {
             &mut c,
             W,
             H,
-            Some(Rect::new(2, 2, 2, 2)),
-            OPAQUE,
-            None,
+            shown(Rect::new(2, 2, 4, 4)),
+            &[Rect::new(0, 0, 4, H)],
             &cfg,
         );
 
         assert_eq!(pixel(&c, 2, 2), cfg.fill.to_argb8888());
-        assert_eq!(pixel(&c, 0, 0), [0xAB; 4], "nothing else was erased");
+        assert_eq!(pixel(&c, 0, 0), [0; 4], "the region is cleared");
+        assert_eq!(
+            pixel(&c, 5, 5),
+            [0xAB; 4],
+            "past the region, even inside the selection"
+        );
+        assert_eq!(pixel(&c, 7, 0), [0xAB; 4], "nothing else was erased");
     }
 
     #[test]
@@ -523,9 +550,11 @@ mod tests {
             &mut c,
             W,
             H,
-            Some(Rect::new(2, 2, 4, 4)),
-            0x80,
-            all(W, H),
+            Some(Painted {
+                rect: Rect::new(2, 2, 4, 4),
+                opacity: 0x80,
+            }),
+            &all(W, H),
             &cfg,
         );
 
@@ -541,11 +570,106 @@ mod tests {
             &mut c,
             W,
             H,
-            Some(Rect::new(2, 2, 4, 4)),
-            0,
-            all(W, H),
+            Some(Painted {
+                rect: Rect::new(2, 2, 4, 4),
+                opacity: 0,
+            }),
+            &all(W, H),
             &config(),
         );
         assert!(c.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn an_unchanged_selection_has_nothing_to_repaint() {
+        let cfg = config();
+        let same = shown(Rect::new(2, 2, 4, 4));
+        assert!(changes(same, same, &cfg, W, H).iter().all(Rect::is_empty));
+        assert!(changes(None, None, &cfg, W, H).iter().all(Rect::is_empty));
+    }
+
+    #[test]
+    fn a_one_pixel_drag_repaints_a_thin_band_not_the_box() {
+        let cfg = Config {
+            border_width: 2,
+            corner_radius: 8,
+            ..config()
+        };
+        let (w, h) = (1920, 1080);
+        let was = Rect::new(100, 100, 800, 600);
+        let now = Rect::new(100, 100, 801, 601);
+
+        let area: u64 = changes(shown(was), shown(now), &cfg, w, h)
+            .iter()
+            .map(|r| r.width as u64 * r.height as u64)
+            .sum();
+        let full = now.width as u64 * now.height as u64;
+
+        assert!(area > 0);
+        assert!(area * 20 < full, "repainted {area} of {full} pixels");
+    }
+
+    #[test]
+    fn repainting_the_changes_matches_a_full_redraw() {
+        let (w, h) = (40, 30);
+        let origin = Rect::new(8, 6, 20, 14);
+        let frames = [
+            (origin, Rect::new(8, 6, 21, 14)),
+            (origin, Rect::new(8, 6, 20, 15)),
+            (origin, Rect::new(8, 6, 27, 19)),
+            (origin, Rect::new(8, 6, 12, 9)),
+            (origin, Rect::new(3, 2, 20, 14)),
+            (origin, Rect::new(2, 1, 6, 5)),
+            (origin, Rect::new(30, 20, 20, 14)),
+            (origin, Rect::new(-5, -4, 20, 14)),
+            (origin, Rect::new(20, 0, 4, 30)),
+            (Rect::new(0, 0, w, h), Rect::new(1, 1, w - 2, h - 2)),
+            (Rect::new(10, 10, 3, 3), Rect::new(10, 10, 4, 3)),
+        ];
+        let opacities = [(OPAQUE, OPAQUE), (OPAQUE, 0x80), (0x80, 0x80)];
+
+        for border_width in [0, 1, 3] {
+            for corner_radius in [0, 6] {
+                let cfg = Config {
+                    fill: Color::rgba(0x4c, 0x9e, 0xd9, 0x40),
+                    border: Color::rgba(0xd9, 0x4c, 0x9e, 0xcc),
+                    border_width,
+                    corner_radius,
+                    ..Config::default()
+                };
+
+                let mut pairs = Vec::new();
+                for (a, b) in frames {
+                    for (oa, ob) in opacities {
+                        let was = Painted {
+                            rect: a,
+                            opacity: oa,
+                        };
+                        let now = Painted {
+                            rect: b,
+                            opacity: ob,
+                        };
+                        pairs.push((Some(was), Some(now)));
+                        pairs.push((Some(now), Some(was)));
+                    }
+                    pairs.push((shown(a), None));
+                    pairs.push((None, shown(b)));
+                }
+
+                for (was, now) in pairs {
+                    let mut expected = sized_canvas(w, h);
+                    draw(&mut expected, w, h, now, &all(w, h), &cfg);
+
+                    let mut actual = sized_canvas(w, h);
+                    draw(&mut actual, w, h, was, &all(w, h), &cfg);
+                    draw(&mut actual, w, h, now, &changes(was, now, &cfg, w, h), &cfg);
+
+                    assert!(
+                        expected == actual,
+                        "border {border_width}, radius {corner_radius}: {was:?} -> {now:?}"
+                    );
+                }
+            }
+        }
     }
 }

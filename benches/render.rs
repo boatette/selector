@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use selector::config::{Color, Config};
 use selector::geometry::Rect;
-use selector::render::{self, BYTES_PER_PIXEL, OPAQUE};
+use selector::render::{self, BYTES_PER_PIXEL, OPAQUE, Painted};
 
 const FRAME_BUDGET: Duration = Duration::from_nanos(6_944_444);
 
@@ -21,6 +21,10 @@ fn config(border_width: u32, corner_radius: u32) -> Config {
         corner_radius,
         ..Config::default()
     }
+}
+
+fn shown(rect: Rect, opacity: u8) -> Painted {
+    Painted { rect, opacity }
 }
 
 fn centred(width: u32, height: u32, fraction: f64) -> Rect {
@@ -80,7 +84,7 @@ fn measure(canvas: &mut [u8], mut body: impl FnMut(&mut [u8])) -> Measurement {
 fn main() {
     println!(
         "selector render benchmark — throughput is over the whole canvas, \
-         which is what the current full-surface clear touches every frame\n"
+         so frames that only repaint what changed read far above memory bandwidth\n"
     );
 
     for (width, height, label) in SIZES {
@@ -114,77 +118,57 @@ fn main() {
             ),
         ];
 
-        let cold = Some(Rect::new(0, 0, width, height));
+        let cold = [Rect::new(0, 0, width, height)];
 
         for (name, rect, cfg) in scenarios {
+            let selection = rect.map(|rect| shown(rect, OPAQUE));
             measure(&mut canvas, |canvas| {
-                render::draw(canvas, width, height, black_box(rect), OPAQUE, cold, cfg)
+                render::draw(canvas, width, height, black_box(selection), &cold, cfg)
             })
             .report(name);
         }
 
         let base = centred(width, height, 0.30);
-        let mut nudge = 0i32;
-        let mut previous = Some(base);
-        measure(&mut canvas, |canvas| {
-            nudge = (nudge + 1) % 2;
-            let rect = Rect::new(base.x + nudge, base.y, base.width, base.height);
-            render::draw(
-                canvas,
-                width,
-                height,
-                black_box(Some(rect)),
-                OPAQUE,
-                previous,
-                &square,
-            );
-            previous = Some(rect);
-        })
-        .report("30% nudged 1px (a drag frame)");
 
-        let mut nudge = 0i32;
-        let mut previous = Some(base);
-        measure(&mut canvas, |canvas| {
-            nudge = (nudge + 1) % 2;
-            let rect = Rect::new(base.x + nudge, base.y, base.width, base.height);
+        for (name, cfg) in [
+            ("30% nudged 1px (a drag frame)", &square),
+            ("30% rounded, drag frame", &rounded),
+        ] {
             render::draw(
-                canvas,
+                &mut canvas,
                 width,
                 height,
-                black_box(Some(rect)),
-                OPAQUE,
-                previous,
-                &rounded,
+                Some(shown(base, OPAQUE)),
+                &cold,
+                cfg,
             );
-            previous = Some(rect);
-        })
-        .report("30% rounded, drag frame");
+            let mut nudge = 0i32;
+            let mut previous = Some(shown(base, OPAQUE));
+            measure(&mut canvas, |canvas| {
+                nudge = (nudge + 1) % 2;
+                let rect = Rect::new(base.x + nudge, base.y, base.width, base.height);
+                let now = Some(shown(rect, OPAQUE));
+                let stale = render::changes(previous, now, cfg, width, height);
+                render::draw(canvas, width, height, black_box(now), &stale, cfg);
+                previous = now;
+            })
+            .report(name);
+        }
 
         let mut opacity = OPAQUE;
         measure(&mut canvas, |canvas| {
+            let previous = Some(shown(base, opacity));
             opacity = opacity.wrapping_sub(1);
-            render::draw(
-                canvas,
-                width,
-                height,
-                black_box(Some(base)),
-                opacity,
-                Some(base),
-                &rounded,
-            );
+            let now = Some(shown(base, opacity));
+            let stale = render::changes(previous, now, &rounded, width, height);
+            render::draw(canvas, width, height, black_box(now), &stale, &rounded);
         })
         .report("30% rounded, fade frame");
 
         measure(&mut canvas, |canvas| {
-            render::draw(
-                canvas,
-                width,
-                height,
-                black_box(None),
-                OPAQUE,
-                Some(base),
-                &square,
-            )
+            let previous = Some(shown(base, OPAQUE));
+            let stale = render::changes(previous, None, &square, width, height);
+            render::draw(canvas, width, height, black_box(None), &stale, &square)
         })
         .report("clearing a released selection");
 

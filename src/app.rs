@@ -20,7 +20,7 @@ use smithay_client_toolkit::{
             LayerSurfaceConfigure,
         },
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
+    shm::{Shm, ShmHandler},
 };
 use wayland_client::{
     Connection, QueueHandle,
@@ -32,7 +32,6 @@ use crate::config::Config;
 use crate::fade::Fade;
 use crate::geometry::Rect;
 use crate::monitor::{Monitor, Paint};
-use crate::render::BYTES_PER_PIXEL;
 use crate::selection::{BTN_LEFT, Selection};
 
 const NAMESPACE: &str = "selector";
@@ -117,14 +116,6 @@ impl App {
 
         layer.commit();
 
-        let pool = match SlotPool::new(BYTES_PER_PIXEL, &self.shm) {
-            Ok(pool) => pool,
-            Err(err) => {
-                log::error!("failed to create shm pool for output {name}: {err}");
-                return;
-            }
-        };
-
         let blur = self.blur.then(|| {
             self.background_effect
                 .get_background_effect(layer.wl_surface(), qh)
@@ -140,7 +131,7 @@ impl App {
         let origin = self.output_origin(&output);
         log::info!("tracking output {name} at ({}, {})", origin.0, origin.1);
         self.monitors
-            .push(Monitor::new(output, layer, pool, origin, blur));
+            .push(Monitor::new(output, layer, origin, blur));
     }
 
     fn output_origin(&self, output: &wl_output::WlOutput) -> (i32, i32) {
@@ -162,6 +153,7 @@ impl App {
             monitors,
             config,
             compositor,
+            shm,
             fade,
             ..
         } = self;
@@ -171,6 +163,7 @@ impl App {
             Paint {
                 config,
                 compositor,
+                shm,
                 look: fade.look(Instant::now()),
             },
         )

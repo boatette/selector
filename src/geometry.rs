@@ -137,6 +137,50 @@ impl Rect {
         }
     }
 
+    pub const fn inset(&self, margin: u32) -> Self {
+        Self {
+            x: self.x.saturating_add(margin as i32),
+            y: self.y.saturating_add(margin as i32),
+            width: self.width.saturating_sub(margin.saturating_mul(2)),
+            height: self.height.saturating_sub(margin.saturating_mul(2)),
+        }
+    }
+
+    pub fn intersect(&self, other: Self) -> Self {
+        let left = self.x.max(other.x);
+        let top = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+
+        Self {
+            x: left,
+            y: top,
+            width: right.saturating_sub(left).max(0) as u32,
+            height: bottom.saturating_sub(top).max(0) as u32,
+        }
+    }
+
+    pub fn minus(&self, hole: Self) -> [Self; 4] {
+        const NONE: Rect = Rect::new(0, 0, 0, 0);
+
+        let hole = self.intersect(hole);
+        if hole.is_empty() {
+            return [*self, NONE, NONE, NONE];
+        }
+
+        let above = (hole.y - self.y) as u32;
+        let below = (self.bottom() - hole.bottom()) as u32;
+        let before = (hole.x - self.x) as u32;
+        let after = (self.right() - hole.right()) as u32;
+
+        [
+            Self::new(self.x, self.y, self.width, above),
+            Self::new(self.x, hole.bottom(), self.width, below),
+            Self::new(self.x, hole.y, before, hole.height),
+            Self::new(hole.right(), hole.y, after, hole.height),
+        ]
+    }
+
     pub fn overlaps_surface(&self, width: u32, height: u32) -> bool {
         !self.clamp_to_surface(width, height).is_empty()
     }
@@ -306,5 +350,58 @@ mod tests {
     fn growing_expands_on_every_side() {
         assert_eq!(Rect::new(5, 5, 10, 10).grow(2), Rect::new(3, 3, 14, 14));
         assert_eq!(Rect::new(5, 5, 10, 10).grow(0), Rect::new(5, 5, 10, 10));
+    }
+
+    #[test]
+    fn insetting_shrinks_on_every_side_until_nothing_is_left() {
+        assert_eq!(Rect::new(5, 5, 10, 10).inset(2), Rect::new(7, 7, 6, 6));
+        assert!(Rect::new(5, 5, 10, 10).inset(5).is_empty());
+        assert!(Rect::new(5, 5, 10, 10).inset(99).is_empty());
+    }
+
+    #[test]
+    fn an_intersection_is_the_shared_area() {
+        let a = Rect::new(0, 0, 10, 10);
+        assert_eq!(a.intersect(Rect::new(5, -5, 10, 10)), Rect::new(5, 0, 5, 5));
+        assert_eq!(a.intersect(Rect::new(2, 2, 3, 3)), Rect::new(2, 2, 3, 3));
+        assert!(a.intersect(Rect::new(10, 0, 5, 5)).is_empty());
+        assert!(a.intersect(Rect::new(-50, -50, 5, 5)).is_empty());
+    }
+
+    fn pixels(rects: &[Rect]) -> Vec<(i32, i32)> {
+        rects
+            .iter()
+            .flat_map(|r| {
+                (r.y..r.bottom()).flat_map(move |y| (r.x..r.right()).map(move |x| (x, y)))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn subtracting_leaves_exactly_the_uncovered_pixels_once() {
+        let r = Rect::new(-3, 2, 12, 9);
+        let holes = [
+            Rect::new(0, 4, 4, 3),
+            Rect::new(-10, -10, 12, 15),
+            Rect::new(5, 5, 20, 20),
+            Rect::new(-3, 2, 12, 9),
+            Rect::new(50, 50, 5, 5),
+            Rect::new(0, 0, 0, 0),
+        ];
+
+        for hole in holes {
+            let strips = r.minus(hole);
+            let covered = pixels(&strips);
+            let unique: std::collections::HashSet<_> = covered.iter().copied().collect();
+            assert_eq!(unique.len(), covered.len(), "strips overlap for {hole:?}");
+
+            let expected: std::collections::HashSet<_> = pixels(&[r])
+                .into_iter()
+                .filter(|&(x, y)| {
+                    !(x >= hole.x && x < hole.right() && y >= hole.y && y < hole.bottom())
+                })
+                .collect();
+            assert_eq!(unique, expected, "wrong coverage for {hole:?}");
+        }
     }
 }
