@@ -8,7 +8,7 @@ repository = "https://github.com/boatette/selector"
 
 [dependencies]
 anyhow = "1"
-env_logger = "0.11"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 smithay-client-toolkit = { version = "0.21", default-features = false }
