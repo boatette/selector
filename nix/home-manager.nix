@@ -125,7 +125,7 @@ in
     systemd.user.services.selector = lib.mkIf cfg.systemd.enable {
       Unit = {
         Description = "A desktop selection box for Wayland compositors";
-        Documentation = "https://github.com/boatette/selector";
+        Documentation = "https://github.com/boatette/selector-flake";
         PartOf = [ "graphical-session.target" ];
         After = [ "graphical-session.target" ];
         ConditionEnvironment = "WAYLAND_DISPLAY";

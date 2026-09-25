@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "A desktop selection box for Wayland"
 license = "MIT"
-repository = "https://github.com/boatette/selector"
+repository = "https://github.com/boatette/selector-flake"
 
 [dependencies]
 anyhow = "1"

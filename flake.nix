@@ -25,7 +25,7 @@
 
           meta = {
             description = "A desktop selection box for Wayland";
-            homepage = "https://github.com/boatette/selector";
+            homepage = "https://github.com/boatette/selector-flake";
             license = pkgs.lib.licenses.mit;
             mainProgram = "selector";
             platforms = pkgs.lib.platforms.linux;

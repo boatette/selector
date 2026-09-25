@@ -99,7 +99,7 @@ The flake exposes a home-manager module as `homeModules.selector`:
 
 ```nix
 {
-  inputs.selector.url = "github:boatette/selector";
+  inputs.selector.url = "github:boatette/selector-flake";
 }
 ```
 
