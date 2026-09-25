@@ -1,0 +1,113 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  PUBLIC_REPO: boatette/selector-flake
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - system: x86_64-linux
+            target: x86_64-unknown-linux-gnu
+          - system: aarch64-linux
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install the cross linker
+        if: matrix.system == 'aarch64-linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          name=selector-$VERSION-${{ matrix.system }}
+          mkdir dist
+          tar -czf "dist/$name.tar.gz" \
+            -C target/${{ matrix.target }}/release selector \
+            -C "$PWD" LICENSE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.system }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PUBLIC_REPO }}
+          token: ${{ secrets.PUBLIC_REPO_TOKEN }}
+          path: public
+
+      - name: Publish the release assets
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
+            --repo "$PUBLIC_REPO" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Prebuilt binaries for selector ${GITHUB_REF_NAME#v}."
+
+      - name: Update the flake
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          base=https://github.com/$PUBLIC_REPO/releases/download/$GITHUB_REF_NAME
+
+          entry() {
+            file=selector-$version-$1.tar.gz
+            hash=sha256-$(openssl dgst -sha256 -binary "dist/$file" | base64)
+            jq -n --arg url "$base/$file" --arg hash "$hash" '{url: $url, hash: $hash}'
+          }
+
+          jq -n --arg version "$version" \
+            --argjson x86 "$(entry x86_64-linux)" \
+            --argjson arm "$(entry aarch64-linux)" \
+            '{version: $version, "x86_64-linux": $x86, "aarch64-linux": $arm}' \
+            > public/release.json
+
+          cp source/nix/home-manager.nix public/nix/home-manager.nix
+
+          cd public
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release.json nix/home-manager.nix
+          git commit -m "release: selector $version"
+          git push
