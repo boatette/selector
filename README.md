@@ -103,6 +103,17 @@ The flake exposes a home-manager module as `homeModules.selector`:
 }
 ```
 
+That flake wraps the release binaries. To build from a checkout of this repo instead, point the input at it; it has the same module, with `package` built from source:
+
+```nix
+{
+  inputs.selector = {
+    url = "git+file:///home/you/Projects/selector";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+}
+```
+
 ```nix
 { inputs, ... }:
 {

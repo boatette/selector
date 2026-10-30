@@ -20,7 +20,18 @@
           pname = "selector";
           version = (fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
-          src = self;
+          # only what cargo reads, so edits to the docs or the nix files don't rebuild it
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./src
+              ./benches
+              # the config tests include_str! it
+              ./config.example.toml
+            ];
+          };
           cargoLock.lockFile = ./Cargo.lock;
 
           meta = {
