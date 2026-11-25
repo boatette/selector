@@ -57,6 +57,7 @@
             cargo
             rustc
             clippy
+            lldb
             rustfmt
             rust-analyzer
           ];
